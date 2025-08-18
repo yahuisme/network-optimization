@@ -1,27 +1,30 @@
 #!/bin/bash
 
 # ==============================================================================
-# Linux TCP/IP & BBR - Balanced Performance Optimization Script
+# Linux TCP/IP & BBR - Balanced Performance Optimization Script (with Color)
 #
 # Description: This script enables TCP BBR and applies a balanced set of sysctl
-#              optimizations suitable for a wide range of modern servers.
-#              It aims for significant performance gains without being overly
-#              aggressive on resource consumption, making it ideal for typical
-#              cloud servers (e.g., 2-4 cores, 4-8GB RAM).
+#              optimizations. Output is colorized for better readability.
 # ==============================================================================
 
 set -e # Exit immediately if a command exits with a non-zero status.
 
+# --- Color Definitions ---
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
 # --- Configuration ---
-# 配置文件路径已根据您的要求指定
 CONF_FILE="/etc/sysctl.d/99-bbr.conf"
 
 # --- Pre-flight Checks ---
 
 # 1. Check for root privileges
 if [[ $(id -u) -ne 0 ]]; then
-    echo "❌ 错误: 此脚本必须以 root 权限运行。"
-    echo "请尝试使用: sudo $0"
+    echo -e "${RED}❌ 错误: 此脚本必须以 root 权限运行。${NC}"
+    echo -e "${YELLOW}请尝试使用: sudo $0${NC}"
     exit 1
 fi
 
@@ -31,11 +34,11 @@ KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
 KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
 
 if (( KERNEL_MAJOR < 4 )) || (( KERNEL_MAJOR == 4 && KERNEL_MINOR < 9 )); then
-    echo "❌ 错误: 检测到内核版本为 $KERNEL_VERSION。"
-    echo "BBR 拥塞控制算法需要 Linux 内核版本 4.9 或更高。"
+    echo -e "${RED}❌ 错误: 检测到内核版本为 $KERNEL_VERSION。${NC}"
+    echo -e "${RED}BBR 拥塞控制算法需要 Linux 内核版本 4.9 或更高。${NC}"
     exit 1
 else
-    echo "✅ 内核版本 $KERNEL_VERSION 符合要求。"
+    echo -e "${GREEN}✅ 内核版本 $KERNEL_VERSION 符合要求。${NC}"
 fi
 
 # --- Main Logic ---
@@ -45,18 +48,18 @@ add_conf() {
     local key="$1"
     local value="$2"
     echo "$key = $value" >> "$CONF_FILE"
-    echo "[新增] $key = $value"
+    echo -e "[${GREEN}新增${NC}] $key = $value"
 }
 
 # --- Backup and Configuration ---
 
-echo "--------------------------------------------------"
-echo ">>> 准备写入网络优化配置到 $CONF_FILE ..."
+echo -e "${CYAN}--------------------------------------------------${NC}"
+echo -e "${CYAN}>>> 准备写入网络优化配置到 $CONF_FILE ...${NC}"
 
 # Create a timestamped backup if the configuration file already exists
 if [ -f "$CONF_FILE" ]; then
     BAK_FILE="$CONF_FILE.bak_$(date +%F_%H-%M-%S)"
-    echo "发现已存在的配置文件，正在创建备份: $BAK_FILE"
+    echo -e "${YELLOW}发现已存在的配置文件，正在创建备份: $BAK_FILE${NC}"
     cp "$CONF_FILE" "$BAK_FILE"
 fi
 # Initialize the file for a clean write
@@ -66,7 +69,7 @@ echo "# This configuration provides a balance between performance and resource u
 echo "" >> "$CONF_FILE"
 
 
-echo ">>> 写入优化参数..."
+echo -e "${CYAN}>>> 写入优化参数...${NC}"
 
 # --- BBR 启用 ---
 add_conf "net.core.default_qdisc" "fq"
@@ -101,33 +104,29 @@ add_conf "net.ipv4.ip_local_port_range" "1024 65535"
 add_conf "fs.file-max" "1048576"
 add_conf "net.netfilter.nf_conntrack_max" "524288"
 
-echo "--------------------------------------------------"
-echo ">>> 应用 sysctl 配置..."
+echo -e "${CYAN}--------------------------------------------------${NC}"
+echo -e "${CYAN}>>> 应用 sysctl 配置...${NC}"
 sysctl --system >/dev/null 2>&1
-echo "✅ 配置已应用。"
+echo -e "${GREEN}✅ 配置已应用。${NC}"
 
-echo "--------------------------------------------------"
-echo ">>> 检查关键优化结果："
-echo -n "TCP 拥塞控制算法: "
-sysctl -n net.ipv4.tcp_congestion_control
-echo -n "默认队列调度算法: "
-sysctl -n net.core.default_qdisc
-echo -n "最大Socket读/写缓冲区: "
-sysctl -n net.core.rmem_max
-echo -n "系统文件句柄上限: "
-sysctl -n fs.file-max
+echo -e "${CYAN}--------------------------------------------------${NC}"
+echo -e "${CYAN}>>> 检查关键优化结果：${NC}"
+echo -e "TCP 拥塞控制算法: ${YELLOW}$(sysctl -n net.ipv4.tcp_congestion_control)${NC}"
+echo -e "默认队列调度算法: ${YELLOW}$(sysctl -n net.core.default_qdisc)${NC}"
+echo -e "最大Socket读/写缓冲区: ${YELLOW}$(sysctl -n net.core.rmem_max)${NC}"
+echo -e "系统文件句柄上限: ${YELLOW}$(sysctl -n fs.file-max)${NC}"
 
-echo "--------------------------------------------------"
-echo ">>> 检查 BBR 模块是否成功启用："
+echo -e "${CYAN}--------------------------------------------------${NC}"
+echo -e "${CYAN}>>> 检查 BBR 模块是否成功启用：${NC}"
 if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
     if lsmod | grep -q tcp_bbr; then
-        echo "✅ BBR 已作为内核模块加载并成功启用。"
+        echo -e "${GREEN}✅ BBR 已作为内核模块加载并成功启用。${NC}"
     else
-        echo "✅ BBR 已内建于内核并成功启用。"
+        echo -e "${GREEN}✅ BBR 已内建于内核并成功启用。${NC}"
     fi
 else
-    echo "❌ BBR 未启用。请检查您的内核配置。"
+    echo -e "${RED}❌ BBR 未启用。请检查您的内核配置。${NC}"
 fi
 
-echo "--------------------------------------------------"
-echo "🎉 TCP/IP & BBR 优化完成！"
+echo -e "${CYAN}--------------------------------------------------${NC}"
+echo -e "${GREEN}🎉 优化完成！${NC}"
