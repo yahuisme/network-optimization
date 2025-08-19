@@ -37,7 +37,7 @@ get_system_info() {
     fi
     
     echo -e "${CYAN}>>> 系统信息检测：${NC}"
-    echo -e "内存大小: ${YELLOW}${TOTAL_MEM}MB (${VM_TIER})${NC}"
+    echo -e "内存大小: ${YELLOW}${TOTAL_MEM}MB${NC}"
     echo -e "CPU核心数: ${YELLOW}${CPU_CORES}${NC}"
     echo -e "虚拟化类型: ${YELLOW}${VIRT_TYPE}${NC}"
 }
@@ -187,6 +187,7 @@ backup_existing_config() {
 # --- 主要优化配置 ---
 apply_optimizations() {
     echo -e "${CYAN}>>> 开始应用网络优化配置...${NC}"
+    echo -e "检测到配置: ${YELLOW}${VM_TIER}${NC}"
     
     # 初始化配置文件
     > "$CONF_FILE"
