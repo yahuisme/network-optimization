@@ -44,31 +44,42 @@ get_system_info() {
 
 # --- 动态参数计算函数 ---
 calculate_parameters() {
-    # 根据内存大小动态调整缓冲区 (适配现代VPS配置)
-    if [ $TOTAL_MEM -le 1024 ]; then
-        # 入门级VPS (1GB)
+    # 根据内存大小动态调整缓冲区 (按区间范围划分)
+    if [ $TOTAL_MEM -le 512 ]; then
+        # 经典级VPS (≤512MB)
+        RMEM_MAX="8388608"      # 8MB
+        WMEM_MAX="8388608"      # 8MB
+        TCP_RMEM="4096 65536 8388608"
+        TCP_WMEM="4096 65536 8388608"
+        SOMAXCONN="32768"
+        NETDEV_BACKLOG="16384"
+        FILE_MAX="262144"
+        CONNTRACK_MAX="131072"
+        VM_TIER="经典级(≤512MB)"
+    elif [ $TOTAL_MEM -le 1024 ]; then
+        # 轻量级VPS (512MB-1GB)
         RMEM_MAX="16777216"     # 16MB
         WMEM_MAX="16777216"     # 16MB
-        TCP_RMEM="4096 87380 16777216"
+        TCP_RMEM="4096 65536 16777216"
         TCP_WMEM="4096 65536 16777216"
-        SOMAXCONN="65535"
-        NETDEV_BACKLOG="32768"
+        SOMAXCONN="49152"
+        NETDEV_BACKLOG="24576"
         FILE_MAX="524288"
         CONNTRACK_MAX="262144"
-        VM_TIER="入门级(1GB)"
+        VM_TIER="轻量级(512MB-1GB)"
     elif [ $TOTAL_MEM -le 2048 ]; then
-        # 标准级VPS (2GB)
+        # 标准级VPS (1GB-2GB)
         RMEM_MAX="33554432"     # 32MB
         WMEM_MAX="33554432"     # 32MB
         TCP_RMEM="4096 87380 33554432"
         TCP_WMEM="4096 65536 33554432"
         SOMAXCONN="65535"
-        NETDEV_BACKLOG="65535"
+        NETDEV_BACKLOG="32768"
         FILE_MAX="1048576"
         CONNTRACK_MAX="524288"
-        VM_TIER="标准级(2GB)"
+        VM_TIER="标准级(1GB-2GB)"
     elif [ $TOTAL_MEM -le 4096 ]; then
-        # 高性能VPS (4GB)
+        # 高性能VPS (2GB-4GB)
         RMEM_MAX="67108864"     # 64MB
         WMEM_MAX="67108864"     # 64MB
         TCP_RMEM="4096 131072 67108864"
@@ -77,9 +88,9 @@ calculate_parameters() {
         NETDEV_BACKLOG="65535"
         FILE_MAX="2097152"
         CONNTRACK_MAX="1048576"
-        VM_TIER="高性能级(4GB)"
+        VM_TIER="高性能级(2GB-4GB)"
     elif [ $TOTAL_MEM -le 8192 ]; then
-        # 企业级VPS (8GB)
+        # 企业级VPS (4GB-8GB)
         RMEM_MAX="134217728"    # 128MB
         WMEM_MAX="134217728"    # 128MB
         TCP_RMEM="8192 131072 134217728"
@@ -88,7 +99,7 @@ calculate_parameters() {
         NETDEV_BACKLOG="65535"
         FILE_MAX="4194304"
         CONNTRACK_MAX="2097152"
-        VM_TIER="企业级(8GB)"
+        VM_TIER="企业级(4GB-8GB)"
     else
         # 旗舰级VPS (>8GB)
         RMEM_MAX="268435456"    # 256MB
