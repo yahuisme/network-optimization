@@ -8,9 +8,10 @@
 #       此版本优化了代码排版，提高了可读性和可维护性。
 #
 # 作者: yahuisme
+# 版本: 1.1
 # ==============================================================================
 
-set -e
+set -euo pipefail
 
 # --- 颜色定义 ---
 GREEN='\033[0;32m'
@@ -36,7 +37,7 @@ get_system_info() {
 
     echo -e "${CYAN}>>> 系统信息检测：${NC}"
     echo -e "内存大小   : ${YELLOW}${TOTAL_MEM}MB${NC}"
-    echo -e "CPU核心数    : ${YELLOW}${CPU_CORES}${NC}"
+    echo -e "CPU核心数   : ${YELLOW}${CPU_CORES}${NC}"
     echo -e "虚拟化类型 : ${YELLOW}${VIRT_TYPE}${NC}"
 }
 
@@ -45,40 +46,40 @@ calculate_parameters() {
     # 根据总内存 (MB) 分级设置网络参数
     if [ "$TOTAL_MEM" -le 512 ]; then # 经典级 (≤512MB)
         VM_TIER="经典级(≤512MB)"
-        RMEM_MAX="8388608";     WMEM_MAX="8388608"
-        TCP_RMEM="4096 65536 8388608";    TCP_WMEM="4096 65536 8388608"
-        SOMAXCONN="32768";     NETDEV_BACKLOG="16384"
-        FILE_MAX="262144";     CONNTRACK_MAX="131072"
+        RMEM_MAX="8388608";       WMEM_MAX="8388608"
+        TCP_RMEM="4096 65536 8388608";     TCP_WMEM="4096 65536 8388608"
+        SOMAXCONN="32768";       NETDEV_BACKLOG="16384"
+        FILE_MAX="262144";       CONNTRACK_MAX="131072"
     elif [ "$TOTAL_MEM" -le 1024 ]; then # 轻量级 (512MB-1GB)
         VM_TIER="轻量级(512MB-1GB)"
-        RMEM_MAX="16777216";    WMEM_MAX="16777216"
-        TCP_RMEM="4096 65536 16777216";   TCP_WMEM="4096 65536 16777216"
-        SOMAXCONN="49152";     NETDEV_BACKLOG="24576"
-        FILE_MAX="524288";     CONNTRACK_MAX="262144"
+        RMEM_MAX="16777216";      WMEM_MAX="16777216"
+        TCP_RMEM="4096 65536 16777216";    TCP_WMEM="4096 65536 16777216"
+        SOMAXCONN="49152";       NETDEV_BACKLOG="24576"
+        FILE_MAX="524288";       CONNTRACK_MAX="262144"
     elif [ "$TOTAL_MEM" -le 2048 ]; then # 标准级 (1GB-2GB)
         VM_TIER="标准级(1GB-2GB)"
-        RMEM_MAX="33554432";    WMEM_MAX="33554432"
-        TCP_RMEM="4096 87380 33554432";   TCP_WMEM="4096 65536 33554432"
-        SOMAXCONN="65535";     NETDEV_BACKLOG="32768"
-        FILE_MAX="1048576";    CONNTRACK_MAX="524288"
+        RMEM_MAX="33554432";      WMEM_MAX="33554432"
+        TCP_RMEM="4096 87380 33554432";    TCP_WMEM="4096 65536 33554432"
+        SOMAXCONN="65535";       NETDEV_BACKLOG="32768"
+        FILE_MAX="1048576";      CONNTRACK_MAX="524288"
     elif [ "$TOTAL_MEM" -le 4096 ]; then # 高性能级 (2GB-4GB)
         VM_TIER="高性能级(2GB-4GB)"
-        RMEM_MAX="67108864";    WMEM_MAX="67108864"
+        RMEM_MAX="67108864";      WMEM_MAX="67108864"
         TCP_RMEM="4096 131072 67108864";  TCP_WMEM="4096 87380 67108864"
-        SOMAXCONN="65535";     NETDEV_BACKLOG="65535"
-        FILE_MAX="2097152";    CONNTRACK_MAX="1048576"
+        SOMAXCONN="65535";       NETDEV_BACKLOG="65535"
+        FILE_MAX="2097152";      CONNTRACK_MAX="1048576"
     elif [ "$TOTAL_MEM" -le 8192 ]; then # 企业级 (4GB-8GB)
         VM_TIER="企业级(4GB-8GB)"
-        RMEM_MAX="134217728";   WMEM_MAX="134217728"
+        RMEM_MAX="134217728";     WMEM_MAX="134217728"
         TCP_RMEM="8192 131072 134217728"; TCP_WMEM="8192 87380 134217728"
-        SOMAXCONN="65535";     NETDEV_BACKLOG="65535"
-        FILE_MAX="4194304";    CONNTRACK_MAX="2097152"
+        SOMAXCONN="65535";       NETDEV_BACKLOG="65535"
+        FILE_MAX="4194304";      CONNTRACK_MAX="2097152"
     else # 旗舰级 (>8GB)
         VM_TIER="旗舰级(>8GB)"
-        RMEM_MAX="134217728";   WMEM_MAX="134217728"
+        RMEM_MAX="134217728";     WMEM_MAX="134217728"
         TCP_RMEM="8192 131072 134217728"; TCP_WMEM="8192 87380 134217728"
-        SOMAXCONN="65535";     NETDEV_BACKLOG="65535"
-        FILE_MAX="8388608";    CONNTRACK_MAX="2097152"
+        SOMAXCONN="65535";       NETDEV_BACKLOG="65535"
+        FILE_MAX="8388608";      CONNTRACK_MAX="2097152"
     fi
 }
 
@@ -89,11 +90,10 @@ pre_flight_checks() {
         echo -e "${RED}❌ 错误: 此脚本必须以root权限运行。${NC}"; exit 1
     fi
 
+    local KERNEL_VERSION
     KERNEL_VERSION=$(uname -r)
-    KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
-    KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
 
-    if (( KERNEL_MAJOR < 4 )) || (( KERNEL_MAJOR == 4 && KERNEL_MINOR < 9 )); then
+    if [[ $(printf '%s\n' "4.9" "$KERNEL_VERSION" | sort -V | head -n1) != "4.9" ]]; then
         echo -e "${RED}❌ 错误: 内核版本 $KERNEL_VERSION 不支持BBR (需要 4.9+)。${NC}"; exit 1
     else
         echo -e "${GREEN}✅ 内核版本 $KERNEL_VERSION, 支持BBR。${NC}"
@@ -187,7 +187,8 @@ EOF
 # --- 应用与验证 ---
 apply_and_verify() {
     echo -e "${CYAN}>>> 使配置生效...${NC}"
-    sysctl --system >/dev/null 2>&1 || { echo -e "${RED}❌ 配置应用失败, 请检查 $CONF_FILE 文件格式。${NC}"; exit 1; }
+    sysctl --system || { echo -e "${RED}❌ 配置应用失败, 请检查 $CONF_FILE 文件格式。${NC}"; exit 1; }
+    
     echo -e "${GREEN}✅ 配置已动态生效。${NC}"
     
     echo -e "${CYAN}>>> 验证优化结果...${NC}"
@@ -223,7 +224,7 @@ show_tips() {
 # --- 主函数 ---
 main() {
     echo -e "${CYAN}======================================================${NC}"
-    echo -e "${CYAN}      Linux TCP/IP & BBR 智能优化脚本      ${NC}"
+    echo -e "${CYAN}       Linux TCP/IP & BBR 智能优化脚本       ${NC}"
     echo -e "${CYAN}======================================================${NC}"
     pre_flight_checks
     get_system_info
