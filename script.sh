@@ -8,7 +8,7 @@
 #       此版本优化了代码排版，提高了可读性和可维护性。
 #
 # 作者: yahuisme
-# 版本: 1.1
+# 版本: 1.2
 # ==============================================================================
 
 set -euo pipefail
@@ -37,7 +37,7 @@ get_system_info() {
 
     echo -e "${CYAN}>>> 系统信息检测：${NC}"
     echo -e "内存大小   : ${YELLOW}${TOTAL_MEM}MB${NC}"
-    echo -e "CPU核心数   : ${YELLOW}${CPU_CORES}${NC}"
+    echo -e "CPU核心数  : ${YELLOW}${CPU_CORES}${NC}"
     echo -e "虚拟化类型 : ${YELLOW}${VIRT_TYPE}${NC}"
 }
 
@@ -47,13 +47,13 @@ calculate_parameters() {
     if [ "$TOTAL_MEM" -le 512 ]; then # 经典级 (≤512MB)
         VM_TIER="经典级(≤512MB)"
         RMEM_MAX="8388608";       WMEM_MAX="8388608"
-        TCP_RMEM="4096 65536 8388608";     TCP_WMEM="4096 65536 8388608"
+        TCP_RMEM="4096 65536 8388608";      TCP_WMEM="4096 65536 8388608"
         SOMAXCONN="32768";       NETDEV_BACKLOG="16384"
         FILE_MAX="262144";       CONNTRACK_MAX="131072"
     elif [ "$TOTAL_MEM" -le 1024 ]; then # 轻量级 (512MB-1GB)
         VM_TIER="轻量级(512MB-1GB)"
         RMEM_MAX="16777216";      WMEM_MAX="16777216"
-        TCP_RMEM="4096 65536 16777216";    TCP_WMEM="4096 65536 16777216"
+        TCP_RMEM="4096 65536 16777216";   TCP_WMEM="4096 65536 16777216"
         SOMAXCONN="49152";       NETDEV_BACKLOG="24576"
         FILE_MAX="524288";       CONNTRACK_MAX="262144"
     elif [ "$TOTAL_MEM" -le 2048 ]; then # 标准级 (1GB-2GB)
@@ -217,15 +217,70 @@ show_tips() {
     if [ -n "$bak_file_hint" ]; then
         echo -e "如需撤销本次优化, 可运行以下命令恢复最新备份:"
         echo -e "${GREEN}mv \"$bak_file_hint\" \"$CONF_FILE\" && sysctl --system${NC}"
+        echo -e "或者直接运行: ${GREEN}bash $0 uninstall${NC}"
     fi
     echo -e "${YELLOW}--------------------------------------------------${NC}"
 }
 
-# --- 主函数 ---
+# --- [新增] 幂等性检查函数 ---
+check_if_already_applied() {
+    if grep -q "# 由脚本自动生成" "$CONF_FILE" 2>/dev/null; then
+        local current_cc
+        current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+        if [[ "$current_cc" == "bbr" ]]; then
+            echo -e "${GREEN}✅ 系统已被此脚本优化，且BBR已启用，无需重复操作。${NC}"
+            exit 0
+        fi
+    fi
+}
+
+# --- [新增] 撤销与卸载函数 ---
+revert_optimizations() {
+    echo -e "${YELLOW}>>> 正在尝试撤销优化...${NC}"
+    
+    local latest_backup
+    latest_backup=$(ls -t "$CONF_FILE.bak_"* 2>/dev/null | head -n 1)
+
+    if [ -f "$latest_backup" ]; then
+        echo -e "找到最新备份文件: ${CYAN}$latest_backup${NC}"
+        # 检查root权限
+        if [[ $(id -u) -ne 0 ]]; then
+            echo -e "${RED}❌ 错误: 恢复操作必须以root权限运行。${NC}"; exit 1
+        fi
+        mv "$latest_backup" "$CONF_FILE"
+        echo -e "${GREEN}✅ 已通过备份文件恢复。${NC}"
+    elif [ -f "$CONF_FILE" ]; then
+        echo -e "${YELLOW}未找到备份文件，将直接删除配置文件...${NC}"
+        if [[ $(id -u) -ne 0 ]]; then
+            echo -e "${RED}❌ 错误: 删除操作必须以root权限运行。${NC}"; exit 1
+        fi
+        rm -f "$CONF_FILE"
+        echo -e "${GREEN}✅ 配置文件已删除。${NC}"
+    else
+        echo -e "${GREEN}✅ 系统未发现优化配置文件，无需操作。${NC}"
+        return 0
+    fi
+    
+    # 让配置生效
+    echo -e "${CYAN}>>> 使恢复后的配置生效...${NC}"
+    sysctl --system >/dev/null 2>&1
+    echo -e "${GREEN}🎉 优化已成功撤销！系统将恢复到内核默认或之前的配置。${NC}"
+}
+
+
+# --- 主函数 (已改造) ---
 main() {
+    # 参数处理：检查是否为卸载命令
+    if [[ "${1:-}" == "uninstall" || "${1:-}" == "--revert" ]]; then
+        revert_optimizations
+        exit 0
+    fi
+
     echo -e "${CYAN}======================================================${NC}"
     echo -e "${CYAN}       Linux TCP/IP & BBR 智能优化脚本       ${NC}"
     echo -e "${CYAN}======================================================${NC}"
+    
+    check_if_already_applied
     pre_flight_checks
     get_system_info
     calculate_parameters
@@ -233,8 +288,10 @@ main() {
     apply_optimizations
     apply_and_verify
     show_tips
+    
     echo -e "\n${GREEN}🎉 所有优化已完成并生效！${NC}"
 }
 
-# --- 脚本入口 ---
-main
+# --- 脚本入口 (已改造) ---
+# 使用 "$@" 将所有命令行参数传递给主函数
+main "$@"
