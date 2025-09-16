@@ -4,11 +4,11 @@
 # Linux TCP/IP & BBR 智能优化脚本
 #
 # 作者: yahuisme
-# 版本: 1.3.2 (版本显示)
+# 版本: 1.4.0 (专业增强版)
 # ==============================================================================
 
-# --- [新增] 脚本版本号定义 ---
-SCRIPT_VERSION="1.3.2"
+# --- 脚本版本号定义 ---
+SCRIPT_VERSION="1.4.0"
 
 set -euo pipefail
 
@@ -29,8 +29,13 @@ get_system_info() {
     TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}' | tr -d '\r')
     CPU_CORES=$(nproc | tr -d '\r')
     
-    if systemd-detect-virt >/dev/null 2>&1; then
+    # 虚拟化类型检测 (增强版)
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
         VIRT_TYPE=$(systemd-detect-virt)
+    elif grep -q -i "hypervisor" /proc/cpuinfo; then
+        VIRT_TYPE="KVM/VMware" # 这是一个通用的判断
+    elif command -v dmidecode >/dev/null 2>&1 && dmidecode -s system-product-name | grep -q -i "virtual"; then
+        VIRT_TYPE=$(dmidecode -s system-product-name)
     else
         VIRT_TYPE="unknown"
     fi
@@ -98,7 +103,7 @@ add_conf() {
 # --- 备份管理与清理函数 (防弹版) ---
 manage_backups() {
     if [ -f "$CONF_FILE" ]; then
-        BAK_FILE="$CONF_FILE.bak_$(date +%F_%H-%M-%S)"
+        local BAK_FILE="$CONF_FILE.bak_$(date +%F_%H-%M-%S)"
         echo -e "${YELLOW}>>> 创建当前配置备份: $BAK_FILE${NC}"
         cp "$CONF_FILE" "$BAK_FILE"
     fi
@@ -108,7 +113,7 @@ manage_backups() {
     set -e # 恢复 "exit-on-error" 模式
     if [ -n "$old_backups" ]; then
         echo -e "${CYAN}>>> 清理旧的备份文件...${NC}"
-        echo "$old_backups" | xargs -r rm
+        echo "$old_backups" | xargs rm # 移除 -r 增强兼容性
         echo -e "${GREEN}✅ 旧备份清理完成。${NC}"
     fi
 }
@@ -148,7 +153,8 @@ EOF
 # --- 应用与验证 ---
 apply_and_verify() {
     echo -e "${CYAN}>>> 使配置生效...${NC}"
-    sysctl --system || { echo -e "${RED}❌ 配置应用失败, 请检查 $CONF_FILE 文件格式。${NC}"; exit 1; }
+    # [优化] 静默化sysctl的输出, 避免无关信息干扰
+    sysctl --system >/dev/null 2>&1 || { echo -e "${RED}❌ 配置应用失败, 请检查 $CONF_FILE 文件格式。${NC}"; exit 1; }
     echo -e "${GREEN}✅ 配置已动态生效。${NC}"
     echo -e "${CYAN}>>> 验证优化结果...${NC}"
     local CURRENT_CC; CURRENT_CC=$(sysctl -n net.ipv4.tcp_congestion_control)
@@ -173,6 +179,36 @@ show_tips() {
         echo -e "或者直接运行: ${GREEN}bash $0 uninstall${NC}"
     fi
     echo -e "${YELLOW}--------------------------------------------------${NC}"
+}
+
+# --- [新增] 冲突配置检查函数 ---
+check_for_conflicts() {
+    local key_params=("net.ipv4.tcp_congestion_control" "net.core.default_qdisc")
+    local conflicting_files=""
+    
+    # 检查主配置文件
+    if grep -qE "$(IFS=|; echo "${key_params[*]}")" /etc/sysctl.conf 2>/dev/null; then
+        conflicting_files+="\n - /etc/sysctl.conf"
+    fi
+
+    # 检查其他 .d 目录下的文件
+    for conf_file in /etc/sysctl.d/*.conf; do
+        # 确保文件存在且不是脚本自己创建的文件
+        if [ "$conf_file" != "$CONF_FILE" ] && [ -f "$conf_file" ]; then
+            if grep -qE "$(IFS=|; echo "${key_params[*]}")" "$conf_file" 2>/dev/null; then
+                conflicting_files+="\n - $conf_file"
+            fi
+        fi
+    done
+
+    if [ -n "$conflicting_files" ]; then
+        echo -e "\n${YELLOW}---------------------- 注意 ----------------------${NC}"
+        echo -e "${YELLOW}⚠️  系统在以下文件中也发现了BBR相关设置:${NC}"
+        echo -e "${CYAN}${conflicting_files}${NC}"
+        echo -e "${YELLOW}为避免配置混乱, 建议您手动编辑这些文件,${NC}"
+        echo -e "${YELLOW}注释或删除其中的冲突行。您的脚本 (${CYAN}$CONF_FILE${YELLOW}) 已生效。${NC}"
+        echo -e "${YELLOW}--------------------------------------------------${NC}"
+    fi
 }
 
 # --- 幂等性检查函数 ---
@@ -208,11 +244,11 @@ revert_optimizations() {
 main() {
     if [[ "${1:-}" == "uninstall" || "${1:-}" == "--revert" ]]; then revert_optimizations; exit 0; fi
     echo -e "${CYAN}======================================================${NC}"
-    # --- [新增] 在标题行显示版本号 ---
     echo -e "${CYAN}      Linux TCP/IP & BBR 智能优化脚本 v${SCRIPT_VERSION}      ${NC}"
     echo -e "${CYAN}======================================================${NC}"
     check_if_already_applied; pre_flight_checks; get_system_info; manage_backups
     apply_optimizations; apply_and_verify; show_tips
+    check_for_conflicts # <-- 调用新增的冲突检查函数
     echo -e "\n${GREEN}🎉 所有优化已完成并生效！${NC}"
 }
 
