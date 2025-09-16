@@ -4,8 +4,11 @@
 # Linux TCP/IP & BBR 智能优化脚本
 #
 # 作者: yahuisme
-# 版本: 1.3.1 (终极兼容版)
+# 版本: 1.3.2 (版本显示)
 # ==============================================================================
+
+# --- [新增] 脚本版本号定义 ---
+SCRIPT_VERSION="1.3.2"
 
 set -euo pipefail
 
@@ -205,7 +208,8 @@ revert_optimizations() {
 main() {
     if [[ "${1:-}" == "uninstall" || "${1:-}" == "--revert" ]]; then revert_optimizations; exit 0; fi
     echo -e "${CYAN}======================================================${NC}"
-    echo -e "${CYAN}        Linux TCP/IP & BBR 智能优化脚本        ${NC}"
+    # --- [新增] 在标题行显示版本号 ---
+    echo -e "${CYAN}      Linux TCP/IP & BBR 智能优化脚本 v${SCRIPT_VERSION}      ${NC}"
     echo -e "${CYAN}======================================================${NC}"
     check_if_already_applied; pre_flight_checks; get_system_info; manage_backups
     apply_optimizations; apply_and_verify; show_tips
