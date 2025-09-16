@@ -4,7 +4,7 @@
 # Linux TCP/IP & BBR 智能优化脚本
 #
 # 作者: yahuisme
-# 版本: 1.6.0 (终极稳定版)
+# 版本: 1.6.0 (终极稳定版, 修正版)
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
@@ -46,7 +46,7 @@ get_system_info() {
     calculate_parameters
 }
 
-# --- 动态参数计算函数 (纯净格式) ---
+# --- 动态参数计算函数 ---
 calculate_parameters() {
     if [ "$TOTAL_MEM" -le 512 ]; then
         VM_TIER="经典级(≤512MB)"
@@ -212,7 +212,7 @@ apply_and_verify() {
     fi
 }
 
-# --- 提示信息 (极简版) ---
+# --- 提示信息 ---
 show_tips() {
     echo ""
     echo -e "${YELLOW}-------------------- 操作完成 --------------------${NC}"
@@ -230,12 +230,12 @@ show_tips() {
 check_for_conflicts() {
     local key_params=("net.ipv4.tcp_congestion_control" "net.core.default_qdisc")
     local conflicting_files=""
-    if grep -qE "$(IFS=|; echo "${key_params[*]}")" /etc/sysctl.conf 2>/dev/null; then
+    if grep -qE "$((IFS="|"; echo "${key_params[*]}"))" /etc/sysctl.conf 2>/dev/null; then
         conflicting_files+="\n - /etc/sysctl.conf"
     fi
     for conf_file in /etc/sysctl.d/*.conf; do
         if [ "$conf_file" != "$CONF_FILE" ] && [ -f "$conf_file" ]; then
-            if grep -qE "$(IFS=|; echo "${key_params[*]}")" "$conf_file" 2>/dev/null; then
+            if grep -qE "$((IFS="|"; echo "${key_params[*]}"))" "$conf_file" 2>/dev/null; then
                 conflicting_files+="\n - $conf_file"
             fi
         fi
@@ -314,7 +314,6 @@ main() {
     
     echo -e "\n${GREEN}🎉 所有优化已完成并生效！${NC}"
     
-    # 明确退出，防止父Shell在特殊环境下产生幻影错误
     exit 0
 }
 
