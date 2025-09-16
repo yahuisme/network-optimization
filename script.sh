@@ -3,12 +3,12 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 作者: yahuisme
-# 版本: 1.6.0 (终极稳定版, 修正版)
+# 作者: yahuisme  
+# 版本: 1.6.1 (修复版)
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="1.6.1"
 
 set -euo pipefail
 
@@ -226,20 +226,30 @@ show_tips() {
     echo -e "${YELLOW}--------------------------------------------------${NC}"
 }
 
-# --- 冲突配置检查函数 ---
+# --- 冲突配置检查函数 (修复版) ---
 check_for_conflicts() {
     local key_params=("net.ipv4.tcp_congestion_control" "net.core.default_qdisc")
     local conflicting_files=""
-    if grep -qE "$((IFS="|"; echo "${key_params[*]}"))" /etc/sysctl.conf 2>/dev/null; then
+    local pattern
+    
+    # 构建grep模式
+    pattern=$(printf '%s\|' "${key_params[@]}")
+    pattern="${pattern%\\|}"  # 移除末尾的\|
+    
+    # 检查主配置文件
+    if grep -qE "$pattern" /etc/sysctl.conf 2>/dev/null; then
         conflicting_files+="\n - /etc/sysctl.conf"
     fi
+    
+    # 检查其他配置文件
     for conf_file in /etc/sysctl.d/*.conf; do
         if [ "$conf_file" != "$CONF_FILE" ] && [ -f "$conf_file" ]; then
-            if grep -qE "$((IFS="|"; echo "${key_params[*]}"))" "$conf_file" 2>/dev/null; then
+            if grep -qE "$pattern" "$conf_file" 2>/dev/null; then
                 conflicting_files+="\n - $conf_file"
             fi
         fi
     done
+    
     if [ -n "$conflicting_files" ]; then
         echo -e "\n${YELLOW}---------------------- 注意 ----------------------${NC}"
         echo -e "${YELLOW}⚠️  系统在以下文件中也发现了BBR相关设置:${NC}"
