@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# Linux TCP/IP & BBR 智能优化脚本 (已修复版本)
+# Linux TCP/IP & BBR 智能优化脚本 (最终修复版)
 #
 # 描述: 此脚本实现了核心网络参数的动态适配与BBR的自动启用。
 #       具备完善的预检查、自动化备份与清理机制，确保操作既高效又安全。
 #       此版本优化了代码排版，提高了可读性和可维护性。
 #
 # 作者: yahuisme
-# 版本: 1.2.1 (修复版)
+# 版本: 1.2.2 (最终修复版)
 # ==============================================================================
 
 set -euo pipefail
@@ -26,8 +26,10 @@ CONF_FILE="/etc/sysctl.d/99-bbr.conf"
 
 # --- 系统信息检测函数 ---
 get_system_info() {
-    TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}')
-    CPU_CORES=$(nproc)
+    # [最终修复] 添加 tr -d '\r' 来清除free命令输出中可能包含的隐藏回车符
+    TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}' | tr -d '\r')
+    CPU_CORES=$(nproc | tr -d '\r')
+    
     # 尝试检测虚拟化类型，失败则为 unknown
     if systemd-detect-virt >/dev/null 2>&1; then
         VIRT_TYPE=$(systemd-detect-virt)
@@ -40,7 +42,7 @@ get_system_info() {
     echo -e "CPU核心数  : ${YELLOW}${CPU_CORES}${NC}"
     echo -e "虚拟化类型 : ${YELLOW}${VIRT_TYPE}${NC}"
 
-    # [修复] 在此调用参数计算函数，确保 TOTAL_MEM 变量作用域有效
+    # 调用参数计算函数，确保 TOTAL_MEM 变量作用域有效
     calculate_parameters
 }
 
@@ -286,7 +288,6 @@ main() {
     check_if_already_applied
     pre_flight_checks
     get_system_info
-    # [修复] calculate_parameters 已被移动到 get_system_info 内部，故删除此行
     manage_backups
     apply_optimizations
     apply_and_verify
