@@ -4,11 +4,11 @@
 # Linux TCP/IP & BBR 智能优化脚本
 #
 # 作者: yahuisme
-# 版本: 1.5.0 (极简输出版)
+# 版本: 1.5.1 (最终稳定版)
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.5.1"
 
 set -euo pipefail
 
@@ -79,12 +79,14 @@ calculate_parameters() {
 pre_flight_checks() {
     echo -e "${BLUE}>>> 执行预检查...${NC}"
     if [[ $(id -u) -ne 0 ]]; then
-        echo -e "${RED}❌ 错误: 此脚本必须以root权限运行。${NC}"; exit 1
+        echo -e "${RED}❌ 错误: 此脚本必须以root权限运行。${NC}"
+        exit 1
     fi
     local KERNEL_VERSION
     KERNEL_VERSION=$(uname -r)
     if [[ $(printf '%s\n' "4.9" "$KERNEL_VERSION" | sort -V | head -n1) != "4.9" ]]; then
-        echo -e "${RED}❌ 错误: 内核版本 $KERNEL_VERSION 不支持BBR (需要 4.9+)。${NC}"; exit 1
+        echo -e "${RED}❌ 错误: 内核版本 $KERNEL_VERSION 不支持BBR (需要 4.9+)。${NC}"
+        exit 1
     else
         echo -e "${GREEN}✅ 内核版本 $KERNEL_VERSION, 支持BBR。${NC}"
     fi
@@ -96,7 +98,9 @@ pre_flight_checks() {
 
 # --- 配置写入函数 ---
 add_conf() {
-    local key="$1"; local value="$2"; local comment="$3"
+    local key="$1"
+    local value="$2"
+    local comment="$3"
     echo "# $comment" >> "$CONF_FILE"
     echo "$key = $value" >> "$CONF_FILE"
     echo "" >> "$CONF_FILE"
@@ -216,7 +220,8 @@ check_if_already_applied() {
         local current_cc
         current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
         if [[ "$current_cc" == "bbr" ]]; then
-            echo -e "${GREEN}✅ 系统已被此脚本优化，且BBR已启用，无需重复操作。${NC}"; exit 0
+            echo -e "${GREEN}✅ 系统已被此脚本优化，且BBR已启用，无需重复操作。${NC}"
+            exit 0
         fi
     fi
 }
@@ -229,19 +234,22 @@ revert_optimizations() {
     if [ -f "$latest_backup" ]; then
         echo -e "找到最新备份文件: ${CYAN}$latest_backup${NC}"
         if [[ $(id -u) -ne 0 ]]; then
-            echo -e "${RED}❌ 错误: 恢复操作必须以root权限运行。${NC}"; exit 1
+            echo -e "${RED}❌ 错误: 恢复操作必须以root权限运行。${NC}"
+            exit 1
         fi
         mv "$latest_backup" "$CONF_FILE"
         echo -e "${GREEN}✅ 已通过备份文件恢复。${NC}"
     elif [ -f "$CONF_FILE" ]; then
         echo -e "${YELLOW}未找到备份文件，将直接删除配置文件...${NC}"
         if [[ $(id -u) -ne 0 ]]; then
-            echo -e "${RED}❌ 错误: 删除操作必须以root权限运行。${NC}"; exit 1
+            echo -e "${RED}❌ 错误: 删除操作必须以root权限运行。${NC}"
+            exit 1
         fi
         rm -f "$CONF_FILE"
         echo -e "${GREEN}✅ 配置文件已删除。${NC}"
     else
-        echo -e "${GREEN}✅ 系统未发现优化配置文件，无需操作。${NC}"; return 0
+        echo -e "${GREEN}✅ 系统未发现优化配置文件，无需操作。${NC}"
+        return 0
     fi
     echo -e "${CYAN}>>> 使恢复后的配置生效...${NC}"
     sysctl --system >/dev/null 2>&1
@@ -254,9 +262,11 @@ main() {
         revert_optimizations
         exit 0
     fi
+
     echo -e "${CYAN}======================================================${NC}"
     echo -e "${CYAN}      Linux TCP/IP & BBR 智能优化脚本 v${SCRIPT_VERSION}      ${NC}"
     echo -e "${CYAN}======================================================${NC}"
+    
     check_if_already_applied
     pre_flight_checks
     get_system_info
@@ -265,6 +275,7 @@ main() {
     apply_and_verify
     show_tips
     check_for_conflicts
+    
     echo -e "\n${GREEN}🎉 所有优化已完成并生效！${NC}"
 }
 
