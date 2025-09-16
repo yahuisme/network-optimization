@@ -4,11 +4,11 @@
 # Linux TCP/IP & BBR 智能优化脚本
 #
 # 作者: yahuisme
-# 版本: 1.4.2 (最终格式优化版)
+# 版本: 1.5.0 (极简输出版)
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="1.4.2"
+SCRIPT_VERSION="1.5.0"
 
 set -euo pipefail
 
@@ -172,7 +172,7 @@ apply_and_verify() {
     fi
 }
 
-# --- 提示信息 ---
+# --- 提示信息 (极简版) ---
 show_tips() {
     echo ""
     echo -e "${YELLOW}-------------------- 操作完成 --------------------${NC}"
@@ -180,14 +180,8 @@ show_tips() {
     local bak_file_hint
     bak_file_hint=$(ls -t "$CONF_FILE.bak_"* 2>/dev/null | head -n 1)
     if [ -n "$bak_file_hint" ]; then
-        echo -e "如需撤销本次优化, 可运行以下命令恢复最新备份:"
+        echo -e "如需恢复备份, 可运行:"
         echo -e "${GREEN}mv \"$bak_file_hint\" \"$CONF_FILE\" && sysctl --system${NC}"
-    fi
-    if [[ "$0" == /dev/fd/* || "$0" == /proc/self/fd/* ]]; then
-        echo -e "为使用卸载功能, 请先将脚本保存为文件 (例如 ${YELLOW}optimize.sh${GREEN}),"
-        echo -e "然后运行: ${GREEN}bash optimize.sh uninstall${NC}"
-    else
-        echo -e "或者直接运行: ${GREEN}bash $0 uninstall${NC}"
     fi
     echo -e "${YELLOW}--------------------------------------------------${NC}"
 }
