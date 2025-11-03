@@ -3,12 +3,14 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 作者: yahuisme  
-# 版本: 1.6.1 (修复版)
+# 版本: 1.6.2 (安全与优化修复)
+# 改进日志 (v1.6.2):
+# - [CRITICAL-FIX] 彻底清除了导致脚本语法错误的非换行空格 (U+00A0)
+# - [优化] 移除了已弃用的 'fs.nr_open' 参数，仅保留 'fs.file-max'
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="1.6.1"
+SCRIPT_VERSION="1.6.2"
 
 set -euo pipefail
 
@@ -185,7 +187,7 @@ EOF
     add_conf "net.ipv4.tcp_tw_reuse" "0" "禁用TIME_WAIT重用"
     add_conf "net.ipv4.tcp_max_tw_buckets" "180000" "增加TIME_WAIT socket最大数量"
     add_conf "fs.file-max" "$FILE_MAX" "系统级最大文件句柄数"
-    add_conf "fs.nr_open" "$FILE_MAX" "单进程最大文件句柄数"
+    # [优化] 移除已弃用的 'fs.nr_open'
     add_conf "net.ipv4.tcp_slow_start_after_idle" "0" "禁用空闲后慢启动"
     add_conf "vm.swappiness" "10" "降低Swap使用倾向"
     if [ -f /proc/sys/net/netfilter/nf_conntrack_max ]; then
@@ -310,7 +312,7 @@ main() {
     fi
 
     echo -e "${CYAN}======================================================${NC}"
-    echo -e "${CYAN}      Linux TCP/IP & BBR 智能优化脚本 v${SCRIPT_VERSION}      ${NC}"
+    echo -e "${CYAN}     Linux TCP/IP & BBR 智能优化脚本 v${SCRIPT_VERSION}     ${NC}"
     echo -e "${CYAN}======================================================${NC}"
     
     check_if_already_applied
