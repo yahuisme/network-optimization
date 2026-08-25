@@ -3,17 +3,12 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: 2.1.0
-# 改进日志:
-# - [核心] 启用 tcp_tw_reuse，解决高并发下的端口耗尽问题
-# - [新增] 增加 TCP Keepalive 调优和 UDP 缓冲区优化
-# - [界面] 统一分段、步骤提示和结果摘要
-# - [反馈] 增加应用结果、配置路径和生效参数展示
-# - [维护] 优化 uninstall/restore 的操作反馈
+# 版本: 2.1.1
+# - [输出] 详细展示当前内存档位实际写入的 BBR/TCP/UDP/sysctl 配置
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="2.1.0"
+SCRIPT_VERSION="2.1.1"
 
 set -euo pipefail
 
@@ -184,21 +179,46 @@ configure_swap() {
 }
 
 show_optimization_plan() {
-    echo -e "${CYAN}  本档位将应用以下参数：${NC}"
-    echo -e "  ├─ 拥塞控制   : ${YELLOW}BBR${NC} + ${YELLOW}fq${NC} 队列"
-    echo -e "  ├─ 缓冲区上限 : 接收 ${YELLOW}${RMEM_MAX}${NC} / 发送 ${YELLOW}${WMEM_MAX}${NC} bytes"
-    echo -e "  ├─ TCP 缓冲区 : ${YELLOW}8192 262144 ${TCP_MEM_MAX}${NC}"
-    echo -e "  ├─ UDP 缓冲区 : 接收/发送下限 ${YELLOW}16384${NC} bytes"
-    echo -e "  ├─ 连接队列   : somaxconn/backlog ${YELLOW}${SOMAXCONN}${NC}"
-    echo -e "  ├─ 文件句柄   : ${YELLOW}${FILE_MAX}${NC}"
+    echo -e "${CYAN}  本档位将写入以下优化配置：${NC}"
+    echo -e "  ${BLUE}▸ 拥塞控制与队列${NC}"
+    echo -e "    net.ipv4.tcp_congestion_control = ${YELLOW}bbr${NC}"
+    echo -e "    net.core.default_qdisc          = ${YELLOW}fq${NC}"
+    echo -e "  ${BLUE}▸ TCP / UDP 缓冲区${NC}"
+    echo -e "    net.core.rmem_max                = ${YELLOW}${RMEM_MAX}${NC}"
+    echo -e "    net.core.wmem_max                = ${YELLOW}${WMEM_MAX}${NC}"
+    echo -e "    net.core.rmem_default            = ${YELLOW}262144${NC}"
+    echo -e "    net.core.wmem_default            = ${YELLOW}262144${NC}"
+    echo -e "    net.ipv4.tcp_rmem               = ${YELLOW}8192 262144 ${TCP_MEM_MAX}${NC}"
+    echo -e "    net.ipv4.tcp_wmem               = ${YELLOW}8192 262144 ${TCP_MEM_MAX}${NC}"
+    echo -e "    net.ipv4.udp_rmem_min           = ${YELLOW}16384${NC}"
+    echo -e "    net.ipv4.udp_wmem_min           = ${YELLOW}16384${NC}"
+    echo -e "  ${BLUE}▸ 连接队列与并发${NC}"
+    echo -e "    net.core.somaxconn              = ${YELLOW}${SOMAXCONN}${NC}"
+    echo -e "    net.core.netdev_max_backlog     = ${YELLOW}${SOMAXCONN}${NC}"
+    echo -e "    net.ipv4.tcp_max_syn_backlog    = ${YELLOW}${SOMAXCONN}${NC}"
+    echo -e "    fs.file-max                     = ${YELLOW}${FILE_MAX}${NC}"
+    echo -e "  ${BLUE}▸ TIME_WAIT / 端口复用${NC}"
+    echo -e "    net.ipv4.tcp_tw_reuse           = ${YELLOW}1${NC}"
+    echo -e "    net.ipv4.tcp_timestamps         = ${YELLOW}1${NC}"
+    echo -e "    net.ipv4.tcp_fin_timeout         = ${YELLOW}30${NC}"
+    echo -e "    net.ipv4.tcp_max_tw_buckets      = ${YELLOW}500000${NC}"
+    echo -e "    net.ipv4.ip_local_port_range     = ${YELLOW}10000 65535${NC}"
+    echo -e "  ${BLUE}▸ Keepalive / 延迟${NC}"
+    echo -e "    net.ipv4.tcp_keepalive_time      = ${YELLOW}600${NC}"
+    echo -e "    net.ipv4.tcp_keepalive_intvl     = ${YELLOW}15${NC}"
+    echo -e "    net.ipv4.tcp_keepalive_probes    = ${YELLOW}5${NC}"
+    echo -e "    net.ipv4.tcp_notsent_lowat       = ${YELLOW}16384${NC}"
+    echo -e "    net.ipv4.tcp_mtu_probing         = ${YELLOW}1${NC}"
+    echo -e "  ${BLUE}▸ 系统与安全${NC}"
+    echo -e "    vm.swappiness                    = ${YELLOW}10${NC}"
+    echo -e "    net.ipv4.tcp_syncookies          = ${YELLOW}1${NC}"
     if [[ -f /proc/sys/net/netfilter/nf_conntrack_max ]]; then
-        echo -e "  ├─ 连接跟踪   : ${YELLOW}${CONNTRACK_MAX}${NC}"
+        echo -e "    net.netfilter.nf_conntrack_max   = ${YELLOW}${CONNTRACK_MAX}${NC}"
+        echo -e "    conntrack established timeout    = ${YELLOW}7200${NC} 秒"
+        echo -e "    conntrack TIME_WAIT timeout      = ${YELLOW}120${NC} 秒"
     else
-        echo -e "  ├─ 连接跟踪   : ${YELLOW}跳过（内核不支持）${NC}"
+        echo -e "    conntrack                       = ${YELLOW}跳过（内核不支持）${NC}"
     fi
-    echo -e "  ├─ TIME_WAIT  : tcp_tw_reuse=${YELLOW}1${NC}，fin_timeout=${YELLOW}30${NC}"
-    echo -e "  ├─ Keepalive  : ${YELLOW}600 / 15 / 5${NC} 秒/秒/次"
-    echo -e "  └─ 其他参数   : swappiness=${YELLOW}10${NC}，MTU probing=${YELLOW}1${NC}，syncookies=${YELLOW}1${NC}"
     separator
 }
 apply_optimizations() {
