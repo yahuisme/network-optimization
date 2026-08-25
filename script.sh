@@ -183,9 +183,27 @@ configure_swap() {
     success "Swap 已启用：${swap_mb}MB"
 }
 
-# --- 核心优化逻辑 (重写部分) ---
+show_optimization_plan() {
+    echo -e "${CYAN}  本档位将应用以下参数：${NC}"
+    echo -e "  ├─ 拥塞控制   : ${YELLOW}BBR${NC} + ${YELLOW}fq${NC} 队列"
+    echo -e "  ├─ 缓冲区上限 : 接收 ${YELLOW}${RMEM_MAX}${NC} / 发送 ${YELLOW}${WMEM_MAX}${NC} bytes"
+    echo -e "  ├─ TCP 缓冲区 : ${YELLOW}8192 262144 ${TCP_MEM_MAX}${NC}"
+    echo -e "  ├─ UDP 缓冲区 : 接收/发送下限 ${YELLOW}16384${NC} bytes"
+    echo -e "  ├─ 连接队列   : somaxconn/backlog ${YELLOW}${SOMAXCONN}${NC}"
+    echo -e "  ├─ 文件句柄   : ${YELLOW}${FILE_MAX}${NC}"
+    if [[ -f /proc/sys/net/netfilter/nf_conntrack_max ]]; then
+        echo -e "  ├─ 连接跟踪   : ${YELLOW}${CONNTRACK_MAX}${NC}"
+    else
+        echo -e "  ├─ 连接跟踪   : ${YELLOW}跳过（内核不支持）${NC}"
+    fi
+    echo -e "  ├─ TIME_WAIT  : tcp_tw_reuse=${YELLOW}1${NC}，fin_timeout=${YELLOW}30${NC}"
+    echo -e "  ├─ Keepalive  : ${YELLOW}600 / 15 / 5${NC} 秒/秒/次"
+    echo -e "  └─ 其他参数   : swappiness=${YELLOW}10${NC}，MTU probing=${YELLOW}1${NC}，syncookies=${YELLOW}1${NC}"
+    separator
+}
 apply_optimizations() {
     section "应用网络优化配置：${VM_TIER}"
+    show_optimization_plan
     > "$CONF_FILE"
     
     cat >> "$CONF_FILE" << EOF
