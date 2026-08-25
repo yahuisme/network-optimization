@@ -3,17 +3,17 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: 2.0.0 (针对代理转发深度优化)
+# 版本: 2.1.0
 # 改进日志:
 # - [核心] 启用 tcp_tw_reuse，解决高并发下的端口耗尽问题
-# - [新增] 增加 TCP Keepalive 调优，快速释放死连接
-# - [新增] 增加 UDP 缓冲区优化 (针对 Hysteria/QUIC)
-# - [新增] 引入 tcp_notsent_lowat 降低延迟
-# - [调整] 优化 conntrack 策略，防止表溢出
+# - [新增] 增加 TCP Keepalive 调优和 UDP 缓冲区优化
+# - [界面] 统一分段、步骤提示和结果摘要
+# - [反馈] 增加应用结果、配置路径和生效参数展示
+# - [维护] 优化 uninstall/restore 的操作反馈
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.1.0"
 
 set -euo pipefail
 
@@ -24,6 +24,15 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 BLUE='\033[0;34m'
 NC='\033[0m'
+
+# --- 统一输出样式 ---
+info() { echo -e "\n${YELLOW}[!] $1${NC}\n" >&2; }
+success() { echo -e "\n${GREEN}[✔] $1${NC}\n" >&2; }
+warning() { echo -e "\n${YELLOW}[⚠] $1${NC}\n" >&2; }
+error() { echo -e "\n${RED}[✖] $1${NC}\n" >&2; }
+section() { echo -e "\n${CYAN}>>> $1${NC}"; }
+step() { echo -e "${BLUE}  [$1/$2]${NC} $3"; }
+separator() { printf '%0.s─' {1..54}; printf '\n'; }
 
 # --- 配置文件路径 ---
 CONF_FILE="/etc/sysctl.d/99-network-optimization.conf"
@@ -43,12 +52,13 @@ get_system_info() {
         VIRT_TYPE="Physical/Unknown"
     fi
 
-    echo -e "${CYAN}>>> 系统信息检测：${NC}"
-    echo -e "内存大小   : ${YELLOW}${TOTAL_MEM}MB${NC}"
-    echo -e "CPU核心数  : ${YELLOW}${CPU_CORES}${NC}"
-    echo -e "虚拟化类型 : ${YELLOW}${VIRT_TYPE}${NC}"
-    
+    section "系统信息检测"
+    echo -e "  内存大小   : ${YELLOW}${TOTAL_MEM}MB${NC}"
+    echo -e "  CPU 核心数 : ${YELLOW}${CPU_CORES}${NC}"
+    echo -e "  虚拟化类型 : ${YELLOW}${VIRT_TYPE}${NC}"
     calculate_parameters
+    echo -e "  优化档位   : ${YELLOW}${VM_TIER}${NC}"
+    separator
 }
 
 # --- 动态参数计算函数 (针对转发业务调整) ---
@@ -128,13 +138,13 @@ migrate_legacy_config() {
         local backup="${LEGACY_CONF_FILE}.migrated_$(date +%F_%H-%M-%S)"
         cp "$LEGACY_CONF_FILE" "$backup"
         rm -f "$LEGACY_CONF_FILE"
-        echo -e "${YELLOW}⚠️ 已备份并停用旧配置: ${LEGACY_CONF_FILE}${NC}"
+        warning "已备份并停用旧配置：${LEGACY_CONF_FILE}"
     fi
 }
 
 configure_swap() {
     if swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
-        echo -e "${GREEN}✅ 已检测到现有 Swap，跳过创建。${NC}"
+        echo -e "${GREEN}  ✔ 已检测到现有 Swap，跳过创建。${NC}"
         return
     fi
 
@@ -150,13 +160,14 @@ configure_swap() {
     local available_mb
     available_mb=$(df -Pm / | awk 'NR==2 {print $4}')
     if [[ -z "$available_mb" || "$available_mb" -lt $((swap_mb + 100)) ]]; then
-        echo -e "${YELLOW}⚠️ 磁盘空间不足，跳过创建 ${swap_mb}MB Swap。${NC}"
+        warning "磁盘空间不足，跳过创建 ${swap_mb}MB Swap。"
         return
     fi
 
-    echo -e "${CYAN}>>> 创建 ${swap_mb}MB Swap...${NC}"
+    section "创建 Swap"
+    step 1 2 "正在准备 ${swap_mb}MB Swap..."
     if [[ -e "$SWAP_FILE" ]]; then
-        echo -e "${YELLOW}⚠️ ${SWAP_FILE} 已存在但未启用，为避免覆盖用户文件，跳过创建。${NC}"
+        warning "${SWAP_FILE} 已存在但未启用，为避免覆盖用户文件，跳过创建。"
         return
     fi
     if command -v fallocate >/dev/null 2>&1; then
@@ -169,12 +180,12 @@ configure_swap() {
     swapon "$SWAP_FILE"
     grep -qF "$SWAP_FILE none swap" /etc/fstab 2>/dev/null || \
         echo "$SWAP_FILE none swap sw 0 0" >> /etc/fstab
-    echo -e "${GREEN}✅ Swap 已启用: ${swap_mb}MB${NC}"
+    success "Swap 已启用：${swap_mb}MB"
 }
 
 # --- 核心优化逻辑 (重写部分) ---
 apply_optimizations() {
-    echo -e "${CYAN}>>> 应用网络优化配置 (${YELLOW}${VM_TIER}${CYAN})...${NC}"
+    section "应用网络优化配置：${VM_TIER}"
     > "$CONF_FILE"
     
     cat >> "$CONF_FILE" << EOF
@@ -225,7 +236,7 @@ EOF
         add_conf "net.netfilter.nf_conntrack_tcp_timeout_established" "7200" "连接跟踪超时 (2小时)"
         add_conf "net.netfilter.nf_conntrack_tcp_timeout_time_wait" "120" "减少 TIME_WAIT 跟踪时间"
     else
-        echo -e "${YELLOW}⚠️ 当前内核不支持 conntrack，跳过相关参数。${NC}"
+        warning "当前内核不支持 conntrack，跳过相关参数。"
     fi
 
     # 7. 其他系统级优化
@@ -237,51 +248,76 @@ EOF
 
 # --- 应用与验证 ---
 apply_and_verify() {
-    echo -e "${CYAN}>>> 应用配置...${NC}"
+    section "应用并验证"
+    step 1 2 "正在加载 sysctl 配置..."
     local sysctl_rc=0
     sysctl --system >/dev/null 2>&1 || sysctl_rc=$?
-    
-    local cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-    local qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
-    local reuse=$(sysctl -n net.ipv4.tcp_tw_reuse 2>/dev/null)
+
+    local cc qdisc reuse
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
+    reuse=$(sysctl -n net.ipv4.tcp_tw_reuse 2>/dev/null || true)
     if [[ "$sysctl_rc" -ne 0 ]]; then
-        echo -e "${YELLOW}⚠️ 部分 sysctl 参数应用失败，请检查 ${CONF_FILE}。${NC}"
+        warning "部分 sysctl 参数应用失败，请检查 ${CONF_FILE}。"
     else
-        echo -e "${GREEN}✅ 优化配置已应用。${NC}"
+        success "优化配置已应用。"
     fi
-    echo -e "拥塞控制: ${YELLOW}${cc}${NC} | 队列算法: ${YELLOW}${qdisc}${NC}"
-    if [ "$reuse" == "1" ]; then
-        echo -e "并发复用: ${GREEN}已启用 (tcp_tw_reuse)${NC}"
+    echo -e "${CYAN}  当前生效参数${NC}"
+    separator
+    echo -e "  拥塞控制 : ${YELLOW}${cc:-未知}${NC}"
+    echo -e "  队列算法 : ${YELLOW}${qdisc:-未知}${NC}"
+    if [ "$reuse" = "1" ]; then
+        echo -e "  TCP 复用  : ${GREEN}已启用${NC}"
     else
-        echo -e "并发复用: ${RED}未启用 (可能被覆盖)${NC}"
+        echo -e "  TCP 复用  : ${RED}未启用${NC}"
     fi
+    separator
 }
 
 # --- 主逻辑 ---
+usage() {
+    cat <<EOF
+Linux Network Optimizer v${SCRIPT_VERSION}
+
+用法：
+  $0             应用网络优化
+  $0 uninstall   删除本脚本配置并恢复系统参数
+  $0 restore     恢复最近一次备份
+EOF
+}
+
 main() {
-    # 简单的参数处理
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then usage; exit 0; fi
     if [[ "${1:-}" == "restore" || "${1:-}" == "uninstall" ]]; then
         local backup
         backup=$(ls -t "${CONF_FILE}.bak_"* 2>/dev/null | head -n1 || true)
         if [[ "${1:-}" == "restore" && -n "$backup" ]]; then
+            section "恢复备份"
+            step 1 2 "正在恢复：$backup"
             cp "$backup" "$CONF_FILE"
+            step 2 2 "正在重新加载 sysctl..."
             sysctl --system >/dev/null 2>&1 || true
-            echo -e "${GREEN}已恢复备份: $backup${NC}"
+            success "已恢复备份：$backup"
             exit 0
         elif [[ "${1:-}" == "restore" ]]; then
-            echo -e "${YELLOW}未找到可恢复的备份。${NC}"
+            warning "未找到可恢复的备份。"
             exit 1
         fi
+        section "卸载网络优化"
+        warning "将删除优化配置并重新加载系统参数。"
+        step 1 2 "正在删除：$CONF_FILE"
         rm -f "$CONF_FILE"
+        step 2 2 "正在重新加载 sysctl..."
         sysctl --system >/dev/null 2>&1 || true
-        echo -e "${GREEN}已删除优化配置。${NC}"
+        success "网络优化配置已删除。"
         exit 0
     fi
 
-    echo -e "${CYAN}======================================================${NC}"
-    echo -e "${CYAN}   Linux Network Optimizer (Proxy Edition) v${SCRIPT_VERSION}   ${NC}"
-    echo -e "${CYAN}======================================================${NC}"
-    
+    echo -e "${CYAN}╭──────────────────────────────────────────────────────╮${NC}"
+    echo -e "${CYAN}│         Linux Network Optimizer v${SCRIPT_VERSION}          │${NC}"
+    echo -e "${CYAN}│              TCP / BBR / Proxy Edition              │${NC}"
+    echo -e "${CYAN}╰──────────────────────────────────────────────────────╯${NC}"
+    echo
     pre_flight_checks
     get_system_info
     configure_swap
