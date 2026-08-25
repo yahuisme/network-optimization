@@ -26,7 +26,9 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # --- 配置文件路径 ---
-CONF_FILE="/etc/sysctl.d/99-bbr.conf"
+CONF_FILE="/etc/sysctl.d/99-network-optimization.conf"
+LEGACY_CONF_FILE="/etc/sysctl.d/99-bbr.conf"
+SWAP_FILE="/swapfile"
 
 # --- 系统信息检测函数 ---
 get_system_info() {
@@ -69,7 +71,7 @@ calculate_parameters() {
         FILE_MAX="524288"
         CONNTRACK_MAX="262144"
     elif [ "$TOTAL_MEM" -le 4096 ]; then
-        VM_TIER="进阶级(2GB-4GB)"
+        VM_TIER="进阶级(1GB-4GB)"
         RMEM_MAX="67108864"   # 64MB
         WMEM_MAX="67108864"
         TCP_MEM_MAX="67108864"
@@ -114,8 +116,60 @@ manage_backups() {
     if [ -f "$CONF_FILE" ]; then
         cp "$CONF_FILE" "$CONF_FILE.bak_$(date +%F_%H-%M-%S)"
         # 保留最近3个备份
-        ls -t "$CONF_FILE.bak_"* 2>/dev/null | tail -n +4 | xargs -r rm
+        find "$(dirname "$CONF_FILE")" -maxdepth 1 -type f \
+            -name "$(basename "$CONF_FILE").bak_*" -printf '%T@ %p\n' 2>/dev/null \
+            | sort -nr | awk 'NR > 3 {sub(/^[^ ]+ /, ""); print}' \
+            | xargs -r rm -f
     fi
+}
+
+migrate_legacy_config() {
+    if [[ -f "$LEGACY_CONF_FILE" ]]; then
+        local backup="${LEGACY_CONF_FILE}.migrated_$(date +%F_%H-%M-%S)"
+        cp "$LEGACY_CONF_FILE" "$backup"
+        rm -f "$LEGACY_CONF_FILE"
+        echo -e "${YELLOW}⚠️ 已备份并停用旧配置: ${LEGACY_CONF_FILE}${NC}"
+    fi
+}
+
+configure_swap() {
+    if swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
+        echo -e "${GREEN}✅ 已检测到现有 Swap，跳过创建。${NC}"
+        return
+    fi
+
+    local swap_mb
+    if [ "$TOTAL_MEM" -le 512 ]; then
+        swap_mb=512
+    elif [ "$TOTAL_MEM" -le 1024 ]; then
+        swap_mb=1024
+    else
+        swap_mb=2048
+    fi
+
+    local available_mb
+    available_mb=$(df -Pm / | awk 'NR==2 {print $4}')
+    if [[ -z "$available_mb" || "$available_mb" -lt $((swap_mb + 100)) ]]; then
+        echo -e "${YELLOW}⚠️ 磁盘空间不足，跳过创建 ${swap_mb}MB Swap。${NC}"
+        return
+    fi
+
+    echo -e "${CYAN}>>> 创建 ${swap_mb}MB Swap...${NC}"
+    if [[ -e "$SWAP_FILE" ]]; then
+        echo -e "${YELLOW}⚠️ ${SWAP_FILE} 已存在但未启用，为避免覆盖用户文件，跳过创建。${NC}"
+        return
+    fi
+    if command -v fallocate >/dev/null 2>&1; then
+        fallocate -l "${swap_mb}M" "$SWAP_FILE"
+    else
+        dd if=/dev/zero of="$SWAP_FILE" bs=1M count="$swap_mb" status=none
+    fi
+    chmod 600 "$SWAP_FILE"
+    mkswap "$SWAP_FILE" >/dev/null
+    swapon "$SWAP_FILE"
+    grep -qF "$SWAP_FILE none swap" /etc/fstab 2>/dev/null || \
+        echo "$SWAP_FILE none swap sw 0 0" >> /etc/fstab
+    echo -e "${GREEN}✅ Swap 已启用: ${swap_mb}MB${NC}"
 }
 
 # --- 核心优化逻辑 (重写部分) ---
@@ -166,9 +220,13 @@ EOF
 
     # 6. 连接跟踪 (Conntrack)
     # 如果模块未加载，写入配置可能会报错，这里做个判断（但通常文件写入没问题，是sysctl -p报错）
-    add_conf "net.netfilter.nf_conntrack_max" "$CONNTRACK_MAX" "最大连接跟踪数"
-    add_conf "net.netfilter.nf_conntrack_tcp_timeout_established" "7200" "连接跟踪超时 (2小时)"
-    add_conf "net.netfilter.nf_conntrack_tcp_timeout_time_wait" "120" "减少 TIME_WAIT 跟踪时间"
+    if [[ -f /proc/sys/net/netfilter/nf_conntrack_max ]]; then
+        add_conf "net.netfilter.nf_conntrack_max" "$CONNTRACK_MAX" "最大连接跟踪数"
+        add_conf "net.netfilter.nf_conntrack_tcp_timeout_established" "7200" "连接跟踪超时 (2小时)"
+        add_conf "net.netfilter.nf_conntrack_tcp_timeout_time_wait" "120" "减少 TIME_WAIT 跟踪时间"
+    else
+        echo -e "${YELLOW}⚠️ 当前内核不支持 conntrack，跳过相关参数。${NC}"
+    fi
 
     # 7. 其他系统级优化
     add_conf "fs.file-max" "$FILE_MAX" "最大文件句柄"
@@ -180,13 +238,17 @@ EOF
 # --- 应用与验证 ---
 apply_and_verify() {
     echo -e "${CYAN}>>> 应用配置...${NC}"
-    sysctl --system >/dev/null 2>&1 || echo -e "${YELLOW}⚠️ 注意: 部分参数应用失败 (可能是容器限制或模块缺失)，但不影响核心功能。${NC}"
+    local sysctl_rc=0
+    sysctl --system >/dev/null 2>&1 || sysctl_rc=$?
     
     local cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
     local qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
     local reuse=$(sysctl -n net.ipv4.tcp_tw_reuse 2>/dev/null)
-    
-    echo -e "${GREEN}✅ 优化完成!${NC}"
+    if [[ "$sysctl_rc" -ne 0 ]]; then
+        echo -e "${YELLOW}⚠️ 部分 sysctl 参数应用失败，请检查 ${CONF_FILE}。${NC}"
+    else
+        echo -e "${GREEN}✅ 优化配置已应用。${NC}"
+    fi
     echo -e "拥塞控制: ${YELLOW}${cc}${NC} | 队列算法: ${YELLOW}${qdisc}${NC}"
     if [ "$reuse" == "1" ]; then
         echo -e "并发复用: ${GREEN}已启用 (tcp_tw_reuse)${NC}"
@@ -198,9 +260,20 @@ apply_and_verify() {
 # --- 主逻辑 ---
 main() {
     # 简单的参数处理
-    if [[ "${1:-}" == "uninstall" ]]; then
+    if [[ "${1:-}" == "restore" || "${1:-}" == "uninstall" ]]; then
+        local backup
+        backup=$(ls -t "${CONF_FILE}.bak_"* 2>/dev/null | head -n1 || true)
+        if [[ "${1:-}" == "restore" && -n "$backup" ]]; then
+            cp "$backup" "$CONF_FILE"
+            sysctl --system >/dev/null 2>&1 || true
+            echo -e "${GREEN}已恢复备份: $backup${NC}"
+            exit 0
+        elif [[ "${1:-}" == "restore" ]]; then
+            echo -e "${YELLOW}未找到可恢复的备份。${NC}"
+            exit 1
+        fi
         rm -f "$CONF_FILE"
-        sysctl --system
+        sysctl --system >/dev/null 2>&1 || true
         echo -e "${GREEN}已删除优化配置。${NC}"
         exit 0
     fi
@@ -211,6 +284,8 @@ main() {
     
     pre_flight_checks
     get_system_info
+    configure_swap
+    migrate_legacy_config
     manage_backups
     apply_optimizations
     apply_and_verify
