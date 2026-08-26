@@ -19,6 +19,8 @@ YELLOW=$'\033[1;33m'
 CYAN=$'\033[0;36m'
 BLUE=$'\033[0;34m'
 NC=$'\033[0m'
+BBR_AVAILABLE=false
+CONF_WRITE_FILE=""
 
 # --- 统一输出样式 ---
 info() { printf '\n%b[!] %s%b\n\n' "$YELLOW" "$1" "$NC" >&2; }
@@ -104,6 +106,11 @@ pre_flight_checks() {
     # 加载必要的内核模块 (尤其是连接跟踪和BBR)
     modprobe nf_conntrack >/dev/null 2>&1 || true
     modprobe tcp_bbr >/dev/null 2>&1 || true
+    if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+        BBR_AVAILABLE=true
+    else
+        warning "当前内核不支持 BBR，将跳过 BBR 配置。"
+    fi
 }
 
 # --- 配置写入函数 ---
@@ -111,9 +118,10 @@ add_conf() {
     local key="$1"
     local value="$2"
     local comment="$3"
-    echo "# $comment" >> "$CONF_FILE"
-    echo "$key = $value" >> "$CONF_FILE"
-    echo "" >> "$CONF_FILE"
+    local target="${CONF_WRITE_FILE:-$CONF_FILE}"
+    echo "# $comment" >> "$target"
+    echo "$key = $value" >> "$target"
+    echo "" >> "$target"
 }
 
 # --- 备份管理 ---
@@ -181,7 +189,11 @@ configure_swap() {
 show_optimization_plan() {
     printf '%b\n' "${CYAN}  本档位将写入以下优化配置：${NC}"
     printf '%b\n' "  ${BLUE}▸ 拥塞控制与队列${NC}"
-    printf '%b\n' "    net.ipv4.tcp_congestion_control = ${YELLOW}bbr${NC}"
+    if [[ "$BBR_AVAILABLE" = true ]]; then
+        printf '%b\n' "    net.ipv4.tcp_congestion_control = ${YELLOW}bbr${NC}"
+    else
+        printf '%b\n' "    net.ipv4.tcp_congestion_control = ${YELLOW}跳过（内核不支持 BBR）${NC}"
+    fi
     printf '%b\n' "    net.core.default_qdisc          = ${YELLOW}fq${NC}"
     printf '%b\n' "  ${BLUE}▸ TCP / UDP 缓冲区${NC}"
     printf '%b\n' "    net.core.rmem_max                = ${YELLOW}${RMEM_MAX}${NC}"
@@ -214,9 +226,14 @@ show_optimization_plan() {
     printf '%b\n' "    net.ipv4.tcp_syncookies          = ${YELLOW}1${NC}"
     if [[ -f /proc/sys/net/netfilter/nf_conntrack_max ]]; then
         printf '%b\n' "    net.netfilter.nf_conntrack_max   = ${YELLOW}${CONNTRACK_MAX}${NC}"
+    fi
+    if [[ -f /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established ]]; then
         printf '%b\n' "    conntrack established timeout    = ${YELLOW}7200${NC} 秒"
+    fi
+    if [[ -f /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_time_wait ]]; then
         printf '%b\n' "    conntrack TIME_WAIT timeout      = ${YELLOW}120${NC} 秒"
-    else
+    fi
+    if [[ ! -e /proc/sys/net/netfilter/nf_conntrack_max ]]; then
         printf '%b\n' "    conntrack                       = ${YELLOW}跳过（内核不支持）${NC}"
     fi
     separator
@@ -224,9 +241,9 @@ show_optimization_plan() {
 apply_optimizations() {
     section "应用网络优化配置：${VM_TIER}"
     show_optimization_plan
-    > "$CONF_FILE"
-    
-    cat >> "$CONF_FILE" << EOF
+    local tmp_file="${CONF_FILE}.tmp.$$"
+    CONF_WRITE_FILE="$tmp_file"
+    cat > "$tmp_file" << EOF
 # ==========================================================
 # Linux Network Tuning (Proxy/Forwarding Optimized)
 # 生成时间: $(date)
@@ -235,8 +252,8 @@ apply_optimizations() {
 EOF
 
     # 1. BBR 与 队列算法
-    add_conf "net.core.default_qdisc" "fq" "FQ 队列算法 (BBR 最佳拍档)"
-    add_conf "net.ipv4.tcp_congestion_control" "bbr" "开启 BBR"
+    add_conf "net.core.default_qdisc" "fq" "FQ 队列算法"
+    [[ "$BBR_AVAILABLE" = true ]] && add_conf "net.ipv4.tcp_congestion_control" "bbr" "开启 BBR"
 
     # 2. 缓冲区优化 (TCP & UDP) - 这对 Hysteria/QUIC 很重要
     add_conf "net.core.rmem_max" "$RMEM_MAX" "系统最大接收缓存"
@@ -271,9 +288,14 @@ EOF
     # 如果模块未加载，写入配置可能会报错，这里做个判断（但通常文件写入没问题，是sysctl -p报错）
     if [[ -f /proc/sys/net/netfilter/nf_conntrack_max ]]; then
         add_conf "net.netfilter.nf_conntrack_max" "$CONNTRACK_MAX" "最大连接跟踪数"
+    fi
+    if [[ -f /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established ]]; then
         add_conf "net.netfilter.nf_conntrack_tcp_timeout_established" "7200" "连接跟踪超时 (2小时)"
+    fi
+    if [[ -f /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_time_wait ]]; then
         add_conf "net.netfilter.nf_conntrack_tcp_timeout_time_wait" "120" "减少 TIME_WAIT 跟踪时间"
-    else
+    fi
+    if [[ ! -e /proc/sys/net/netfilter/nf_conntrack_max ]]; then
         warning "当前内核不支持 conntrack，跳过相关参数。"
     fi
 
@@ -282,6 +304,8 @@ EOF
     add_conf "vm.swappiness" "10" "减少 Swap 使用"
     add_conf "net.ipv4.tcp_mtu_probing" "1" "开启 MTU 探测 (解决部分网络卡顿)"
     add_conf "net.ipv4.tcp_syncookies" "1" "防 SYN Flood"
+    CONF_WRITE_FILE=""
+    mv -f "$tmp_file" "$CONF_FILE"
 }
 
 # --- 应用与验证 ---
@@ -319,7 +343,7 @@ Linux Network Optimizer v${SCRIPT_VERSION}
 
 用法：
   $0             应用网络优化
-  $0 uninstall   删除本脚本配置并恢复系统参数
+  $0 uninstall   删除本脚本配置并重新加载系统参数
   $0 restore     恢复最近一次备份
 EOF
 }
@@ -334,8 +358,12 @@ main() {
             step 1 2 "正在恢复：$backup"
             cp "$backup" "$CONF_FILE"
             step 2 2 "正在重新加载 sysctl..."
-            sysctl --system >/dev/null 2>&1 || true
-            success "已恢复备份：$backup"
+            if sysctl --system >/dev/null 2>&1; then
+                success "已恢复配置文件并重新加载系统参数：$backup"
+            else
+                error "配置文件已恢复，但系统参数重新加载失败。"
+                exit 1
+            fi
             exit 0
         elif [[ "${1:-}" == "restore" ]]; then
             warning "未找到可恢复的备份。"
@@ -346,9 +374,18 @@ main() {
         step 1 2 "正在删除：$CONF_FILE"
         rm -f "$CONF_FILE"
         step 2 2 "正在重新加载 sysctl..."
-        sysctl --system >/dev/null 2>&1 || true
-        success "网络优化配置已删除。"
+        if sysctl --system >/dev/null 2>&1; then
+            success "网络优化配置已删除并重新加载系统参数。"
+        else
+            error "网络优化配置已删除，但系统参数重新加载失败。"
+            exit 1
+        fi
         exit 0
+    fi
+    if [[ $# -gt 0 ]]; then
+        error "未知参数：$1"
+        usage
+        exit 2
     fi
 
     printf '%b\n' "${CYAN}╭──────────────────────────────────────────────────────╮${NC}"
