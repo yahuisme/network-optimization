@@ -13,20 +13,20 @@ SCRIPT_VERSION="2.1.1"
 set -euo pipefail
 
 # --- 颜色定义 ---
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+GREEN=$'\033[0;32m'
+RED=$'\033[0;31m'
+YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'
+BLUE=$'\033[0;34m'
+NC=$'\033[0m'
 
 # --- 统一输出样式 ---
-info() { echo -e "\n${YELLOW}[!] $1${NC}\n" >&2; }
-success() { echo -e "\n${GREEN}[✔] $1${NC}\n" >&2; }
-warning() { echo -e "\n${YELLOW}[⚠] $1${NC}\n" >&2; }
-error() { echo -e "\n${RED}[✖] $1${NC}\n" >&2; }
-section() { echo -e "\n${CYAN}>>> $1${NC}"; }
-step() { echo -e "${BLUE}  [$1/$2]${NC} $3"; }
+info() { printf '\n%b[!] %s%b\n\n' "$YELLOW" "$1" "$NC" >&2; }
+success() { printf '\n%b[✔] %s%b\n\n' "$GREEN" "$1" "$NC" >&2; }
+warning() { printf '\n%b[⚠] %s%b\n\n' "$YELLOW" "$1" "$NC" >&2; }
+error() { printf '\n%b[✖] %s%b\n\n' "$RED" "$1" "$NC" >&2; }
+section() { printf '\n%b>>> %s%b\n' "$CYAN" "$1" "$NC"; }
+step() { printf '%b  [%s/%s]%b %s\n' "$BLUE" "$1" "$2" "$NC" "$3"; }
 separator() { printf '%0.s─' {1..54}; printf '\n'; }
 
 # --- 配置文件路径 ---
@@ -48,11 +48,11 @@ get_system_info() {
     fi
 
     section "系统信息检测"
-    echo -e "  内存大小   : ${YELLOW}${TOTAL_MEM}MB${NC}"
-    echo -e "  CPU 核心数 : ${YELLOW}${CPU_CORES}${NC}"
-    echo -e "  虚拟化类型 : ${YELLOW}${VIRT_TYPE}${NC}"
+    printf '%b\n' "  内存大小   : ${YELLOW}${TOTAL_MEM}MB${NC}"
+    printf '%b\n' "  CPU 核心数 : ${YELLOW}${CPU_CORES}${NC}"
+    printf '%b\n' "  虚拟化类型 : ${YELLOW}${VIRT_TYPE}${NC}"
     calculate_parameters
-    echo -e "  优化档位   : ${YELLOW}${VM_TIER}${NC}"
+    printf '%b\n' "  优化档位   : ${YELLOW}${VM_TIER}${NC}"
     separator
 }
 
@@ -98,7 +98,7 @@ calculate_parameters() {
 # --- 预检查函数 ---
 pre_flight_checks() {
     if [[ $(id -u) -ne 0 ]]; then
-        echo -e "${RED}❌ 错误: 必须 root 权限。${NC}"
+        printf '%b\n' "${RED}❌ 错误: 必须 root 权限。${NC}"
         exit 1
     fi
     # 加载必要的内核模块 (尤其是连接跟踪和BBR)
@@ -139,7 +139,7 @@ migrate_legacy_config() {
 
 configure_swap() {
     if swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
-        echo -e "${GREEN}  ✔ 已检测到现有 Swap，跳过创建。${NC}"
+        printf '%b\n' "${GREEN}  ✔ 已检测到现有 Swap，跳过创建。${NC}"
         return
     fi
 
@@ -179,45 +179,45 @@ configure_swap() {
 }
 
 show_optimization_plan() {
-    echo -e "${CYAN}  本档位将写入以下优化配置：${NC}"
-    echo -e "  ${BLUE}▸ 拥塞控制与队列${NC}"
-    echo -e "    net.ipv4.tcp_congestion_control = ${YELLOW}bbr${NC}"
-    echo -e "    net.core.default_qdisc          = ${YELLOW}fq${NC}"
-    echo -e "  ${BLUE}▸ TCP / UDP 缓冲区${NC}"
-    echo -e "    net.core.rmem_max                = ${YELLOW}${RMEM_MAX}${NC}"
-    echo -e "    net.core.wmem_max                = ${YELLOW}${WMEM_MAX}${NC}"
-    echo -e "    net.core.rmem_default            = ${YELLOW}262144${NC}"
-    echo -e "    net.core.wmem_default            = ${YELLOW}262144${NC}"
-    echo -e "    net.ipv4.tcp_rmem               = ${YELLOW}8192 262144 ${TCP_MEM_MAX}${NC}"
-    echo -e "    net.ipv4.tcp_wmem               = ${YELLOW}8192 262144 ${TCP_MEM_MAX}${NC}"
-    echo -e "    net.ipv4.udp_rmem_min           = ${YELLOW}16384${NC}"
-    echo -e "    net.ipv4.udp_wmem_min           = ${YELLOW}16384${NC}"
-    echo -e "  ${BLUE}▸ 连接队列与并发${NC}"
-    echo -e "    net.core.somaxconn              = ${YELLOW}${SOMAXCONN}${NC}"
-    echo -e "    net.core.netdev_max_backlog     = ${YELLOW}${SOMAXCONN}${NC}"
-    echo -e "    net.ipv4.tcp_max_syn_backlog    = ${YELLOW}${SOMAXCONN}${NC}"
-    echo -e "    fs.file-max                     = ${YELLOW}${FILE_MAX}${NC}"
-    echo -e "  ${BLUE}▸ TIME_WAIT / 端口复用${NC}"
-    echo -e "    net.ipv4.tcp_tw_reuse           = ${YELLOW}1${NC}"
-    echo -e "    net.ipv4.tcp_timestamps         = ${YELLOW}1${NC}"
-    echo -e "    net.ipv4.tcp_fin_timeout         = ${YELLOW}30${NC}"
-    echo -e "    net.ipv4.tcp_max_tw_buckets      = ${YELLOW}500000${NC}"
-    echo -e "    net.ipv4.ip_local_port_range     = ${YELLOW}10000 65535${NC}"
-    echo -e "  ${BLUE}▸ Keepalive / 延迟${NC}"
-    echo -e "    net.ipv4.tcp_keepalive_time      = ${YELLOW}600${NC}"
-    echo -e "    net.ipv4.tcp_keepalive_intvl     = ${YELLOW}15${NC}"
-    echo -e "    net.ipv4.tcp_keepalive_probes    = ${YELLOW}5${NC}"
-    echo -e "    net.ipv4.tcp_notsent_lowat       = ${YELLOW}16384${NC}"
-    echo -e "    net.ipv4.tcp_mtu_probing         = ${YELLOW}1${NC}"
-    echo -e "  ${BLUE}▸ 系统与安全${NC}"
-    echo -e "    vm.swappiness                    = ${YELLOW}10${NC}"
-    echo -e "    net.ipv4.tcp_syncookies          = ${YELLOW}1${NC}"
+    printf '%b\n' "${CYAN}  本档位将写入以下优化配置：${NC}"
+    printf '%b\n' "  ${BLUE}▸ 拥塞控制与队列${NC}"
+    printf '%b\n' "    net.ipv4.tcp_congestion_control = ${YELLOW}bbr${NC}"
+    printf '%b\n' "    net.core.default_qdisc          = ${YELLOW}fq${NC}"
+    printf '%b\n' "  ${BLUE}▸ TCP / UDP 缓冲区${NC}"
+    printf '%b\n' "    net.core.rmem_max                = ${YELLOW}${RMEM_MAX}${NC}"
+    printf '%b\n' "    net.core.wmem_max                = ${YELLOW}${WMEM_MAX}${NC}"
+    printf '%b\n' "    net.core.rmem_default            = ${YELLOW}262144${NC}"
+    printf '%b\n' "    net.core.wmem_default            = ${YELLOW}262144${NC}"
+    printf '%b\n' "    net.ipv4.tcp_rmem               = ${YELLOW}8192 262144 ${TCP_MEM_MAX}${NC}"
+    printf '%b\n' "    net.ipv4.tcp_wmem               = ${YELLOW}8192 262144 ${TCP_MEM_MAX}${NC}"
+    printf '%b\n' "    net.ipv4.udp_rmem_min           = ${YELLOW}16384${NC}"
+    printf '%b\n' "    net.ipv4.udp_wmem_min           = ${YELLOW}16384${NC}"
+    printf '%b\n' "  ${BLUE}▸ 连接队列与并发${NC}"
+    printf '%b\n' "    net.core.somaxconn              = ${YELLOW}${SOMAXCONN}${NC}"
+    printf '%b\n' "    net.core.netdev_max_backlog     = ${YELLOW}${SOMAXCONN}${NC}"
+    printf '%b\n' "    net.ipv4.tcp_max_syn_backlog    = ${YELLOW}${SOMAXCONN}${NC}"
+    printf '%b\n' "    fs.file-max                     = ${YELLOW}${FILE_MAX}${NC}"
+    printf '%b\n' "  ${BLUE}▸ TIME_WAIT / 端口复用${NC}"
+    printf '%b\n' "    net.ipv4.tcp_tw_reuse           = ${YELLOW}1${NC}"
+    printf '%b\n' "    net.ipv4.tcp_timestamps         = ${YELLOW}1${NC}"
+    printf '%b\n' "    net.ipv4.tcp_fin_timeout         = ${YELLOW}30${NC}"
+    printf '%b\n' "    net.ipv4.tcp_max_tw_buckets      = ${YELLOW}500000${NC}"
+    printf '%b\n' "    net.ipv4.ip_local_port_range     = ${YELLOW}10000 65535${NC}"
+    printf '%b\n' "  ${BLUE}▸ Keepalive / 延迟${NC}"
+    printf '%b\n' "    net.ipv4.tcp_keepalive_time      = ${YELLOW}600${NC}"
+    printf '%b\n' "    net.ipv4.tcp_keepalive_intvl     = ${YELLOW}15${NC}"
+    printf '%b\n' "    net.ipv4.tcp_keepalive_probes    = ${YELLOW}5${NC}"
+    printf '%b\n' "    net.ipv4.tcp_notsent_lowat       = ${YELLOW}16384${NC}"
+    printf '%b\n' "    net.ipv4.tcp_mtu_probing         = ${YELLOW}1${NC}"
+    printf '%b\n' "  ${BLUE}▸ 系统与安全${NC}"
+    printf '%b\n' "    vm.swappiness                    = ${YELLOW}10${NC}"
+    printf '%b\n' "    net.ipv4.tcp_syncookies          = ${YELLOW}1${NC}"
     if [[ -f /proc/sys/net/netfilter/nf_conntrack_max ]]; then
-        echo -e "    net.netfilter.nf_conntrack_max   = ${YELLOW}${CONNTRACK_MAX}${NC}"
-        echo -e "    conntrack established timeout    = ${YELLOW}7200${NC} 秒"
-        echo -e "    conntrack TIME_WAIT timeout      = ${YELLOW}120${NC} 秒"
+        printf '%b\n' "    net.netfilter.nf_conntrack_max   = ${YELLOW}${CONNTRACK_MAX}${NC}"
+        printf '%b\n' "    conntrack established timeout    = ${YELLOW}7200${NC} 秒"
+        printf '%b\n' "    conntrack TIME_WAIT timeout      = ${YELLOW}120${NC} 秒"
     else
-        echo -e "    conntrack                       = ${YELLOW}跳过（内核不支持）${NC}"
+        printf '%b\n' "    conntrack                       = ${YELLOW}跳过（内核不支持）${NC}"
     fi
     separator
 }
@@ -300,14 +300,14 @@ apply_and_verify() {
     else
         success "优化配置已应用。"
     fi
-    echo -e "${CYAN}  当前生效参数${NC}"
+    printf '%b\n' "${CYAN}  当前生效参数${NC}"
     separator
-    echo -e "  拥塞控制 : ${YELLOW}${cc:-未知}${NC}"
-    echo -e "  队列算法 : ${YELLOW}${qdisc:-未知}${NC}"
+    printf '%b\n' "  拥塞控制 : ${YELLOW}${cc:-未知}${NC}"
+    printf '%b\n' "  队列算法 : ${YELLOW}${qdisc:-未知}${NC}"
     if [ "$reuse" = "1" ]; then
-        echo -e "  TCP 复用  : ${GREEN}已启用${NC}"
+        printf '%b\n' "  TCP 复用  : ${GREEN}已启用${NC}"
     else
-        echo -e "  TCP 复用  : ${RED}未启用${NC}"
+        printf '%b\n' "  TCP 复用  : ${RED}未启用${NC}"
     fi
     separator
 }
@@ -351,10 +351,10 @@ main() {
         exit 0
     fi
 
-    echo -e "${CYAN}╭──────────────────────────────────────────────────────╮${NC}"
-    echo -e "${CYAN}│         Linux Network Optimizer v${SCRIPT_VERSION}          │${NC}"
-    echo -e "${CYAN}│              TCP / BBR / Proxy Edition              │${NC}"
-    echo -e "${CYAN}╰──────────────────────────────────────────────────────╯${NC}"
+    printf '%b\n' "${CYAN}╭──────────────────────────────────────────────────────╮${NC}"
+    printf '%b\n' "${CYAN}│         Linux Network Optimizer v${SCRIPT_VERSION}          │${NC}"
+    printf '%b\n' "${CYAN}│              TCP / BBR / Proxy Edition              │${NC}"
+    printf '%b\n' "${CYAN}╰──────────────────────────────────────────────────────╯${NC}"
     echo
     pre_flight_checks
     get_system_info
