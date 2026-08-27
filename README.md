@@ -1,10 +1,10 @@
 # network-optimization
 
-Linux TCP / BBR 网络优化脚本，适用于代理、转发等高并发场景。
+Linux TCP / BBR 网络优化脚本，面向代理节点 VPS。
+
+**版本：v26.08.27**
 
 ## 使用
-
-需要 root 权限。
 
 应用优化：
 
@@ -12,13 +12,13 @@ Linux TCP / BBR 网络优化脚本，适用于代理、转发等高并发场景�
 bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/network-optimization/main/script.sh)
 ```
 
-删除配置：
+删除本脚本的 sysctl 配置：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/network-optimization/main/script.sh) uninstall
 ```
 
-恢复最近一次备份：
+恢复最近一次配置备份：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/network-optimization/main/script.sh) restore
@@ -26,7 +26,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/network-optimizatio
 
 ## 说明
 
-- 根据系统内存自动配置参数。
-- 无 Swap 时按内存自动创建，已有 Swap 不修改。
+- 需要 root 权限。
+- 按内存自动调整代理节点的 TCP、UDP、队列和连接跟踪参数。
+- 无 Swap 时自动创建；已有 Swap 不修改。
 - 配置文件：`/etc/sysctl.d/99-network-optimization.conf`。
-- 每次应用前自动备份，保留最近 3 份。
+- 每次应用前保留最近 3 份配置备份。
+- `uninstall` 只删除本脚本的 sysctl 配置，不删除已创建的 Swap。
+- `restore` 只恢复最近一次本脚本配置备份。

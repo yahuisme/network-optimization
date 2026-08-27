@@ -3,12 +3,11 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: 2.1.1
-# - [输出] 详细展示当前内存档位实际写入的 BBR/TCP/UDP/sysctl 配置
+# 版本: v26.08.27
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="2.1.1"
+SCRIPT_VERSION="v26.08.27"
 
 set -euo pipefail
 
@@ -23,13 +22,13 @@ BBR_AVAILABLE=false
 CONF_WRITE_FILE=""
 
 # --- 统一输出样式 ---
-info() { printf '\n%b[!] %s%b\n\n' "$YELLOW" "$1" "$NC" >&2; }
+
 success() { printf '\n%b[✔] %s%b\n\n' "$GREEN" "$1" "$NC" >&2; }
 warning() { printf '\n%b[⚠] %s%b\n\n' "$YELLOW" "$1" "$NC" >&2; }
 error() { printf '\n%b[✖] %s%b\n\n' "$RED" "$1" "$NC" >&2; }
 section() { printf '\n%b>>> %s%b\n' "$CYAN" "$1" "$NC"; }
 step() { printf '%b  [%s/%s]%b %s\n' "$BLUE" "$1" "$2" "$NC" "$3"; }
-separator() { printf '%0.s─' {1..54}; printf '\n'; }
+
 
 # --- 配置文件路径 ---
 CONF_FILE="/etc/sysctl.d/99-network-optimization.conf"
@@ -55,7 +54,6 @@ get_system_info() {
     printf '%b\n' "  虚拟化类型 : ${YELLOW}${VIRT_TYPE}${NC}"
     calculate_parameters
     printf '%b\n' "  优化档位   : ${YELLOW}${VM_TIER}${NC}"
-    separator
 }
 
 # --- 动态参数计算函数 (针对转发业务调整) ---
@@ -63,37 +61,41 @@ calculate_parameters() {
     # 基础连接数设置 - 代理服务器需要更多的连接跟踪
     if [ "$TOTAL_MEM" -le 512 ]; then
         VM_TIER="入门级(≤512MB)"
+        RMEM_MAX="8388608"    # 8MB
+        WMEM_MAX="8388608"
+        TCP_MEM_MAX="8388608"
+        SOMAXCONN="4096"
+        NETDEV_BACKLOG="4096"
+        FILE_MAX="131072"
+        CONNTRACK_MAX="32768"
+    elif [ "$TOTAL_MEM" -le 1024 ]; then
+        VM_TIER="基础级(1GB)"
         RMEM_MAX="16777216"   # 16MB
         WMEM_MAX="16777216"
         TCP_MEM_MAX="16777216"
-        SOMAXCONN="4096"
-        FILE_MAX="65535"
+        SOMAXCONN="8192"
+        NETDEV_BACKLOG="8192"
+        FILE_MAX="262144"
         CONNTRACK_MAX="65536"
-    elif [ "$TOTAL_MEM" -le 1024 ]; then
-        VM_TIER="基础级(1GB)"
+    elif [ "$TOTAL_MEM" -le 4096 ]; then
+        VM_TIER="进阶级(1GB-4GB)"
         RMEM_MAX="33554432"   # 32MB
         WMEM_MAX="33554432"
         TCP_MEM_MAX="33554432"
         SOMAXCONN="16384"
+        NETDEV_BACKLOG="16384"
         FILE_MAX="524288"
-        CONNTRACK_MAX="262144"
-    elif [ "$TOTAL_MEM" -le 4096 ]; then
-        VM_TIER="进阶级(1GB-4GB)"
-        RMEM_MAX="67108864"   # 64MB
-        WMEM_MAX="67108864"
-        TCP_MEM_MAX="67108864"
-        SOMAXCONN="32768"
-        FILE_MAX="1048576"
-        CONNTRACK_MAX="524288"
+        CONNTRACK_MAX="131072"
     else
         VM_TIER="专业级(>4GB)"
         # 限制最大缓冲区，避免单连接吃光内存，注重并发总量
-        RMEM_MAX="134217728"  # 128MB
-        WMEM_MAX="134217728"
-        TCP_MEM_MAX="134217728"
-        SOMAXCONN="65535"
-        FILE_MAX="2097152"
-        CONNTRACK_MAX="1048576" # 100万连接足够绝大多数场景，过大浪费内核内存
+        RMEM_MAX="67108864"    # 64MB
+        WMEM_MAX="67108864"
+        TCP_MEM_MAX="67108864"
+        SOMAXCONN="32768"
+        NETDEV_BACKLOG="32768"
+        FILE_MAX="1048576"
+        CONNTRACK_MAX="262144"
     fi
 }
 
@@ -220,57 +222,17 @@ configure_swap() {
 }
 
 show_optimization_plan() {
-    printf '%b\n' "${CYAN}  本档位将写入以下优化配置：${NC}"
-    printf '%b\n' "  ${BLUE}▸ 拥塞控制与队列${NC}"
-    if [[ "$BBR_AVAILABLE" = true ]]; then
-        printf '%b\n' "    net.ipv4.tcp_congestion_control = ${YELLOW}bbr${NC}"
-    else
-        printf '%b\n' "    net.ipv4.tcp_congestion_control = ${YELLOW}跳过（内核不支持 BBR）${NC}"
-    fi
-    printf '%b\n' "    net.core.default_qdisc          = ${YELLOW}fq${NC}"
-    printf '%b\n' "  ${BLUE}▸ TCP / UDP 缓冲区${NC}"
-    printf '%b\n' "    net.core.rmem_max                = ${YELLOW}${RMEM_MAX}${NC}"
-    printf '%b\n' "    net.core.wmem_max                = ${YELLOW}${WMEM_MAX}${NC}"
-    printf '%b\n' "    net.core.rmem_default            = ${YELLOW}262144${NC}"
-    printf '%b\n' "    net.core.wmem_default            = ${YELLOW}262144${NC}"
-    printf '%b\n' "    net.ipv4.tcp_rmem               = ${YELLOW}8192 262144 ${TCP_MEM_MAX}${NC}"
-    printf '%b\n' "    net.ipv4.tcp_wmem               = ${YELLOW}8192 262144 ${TCP_MEM_MAX}${NC}"
-    printf '%b\n' "    net.ipv4.udp_rmem_min           = ${YELLOW}16384${NC}"
-    printf '%b\n' "    net.ipv4.udp_wmem_min           = ${YELLOW}16384${NC}"
-    printf '%b\n' "  ${BLUE}▸ 连接队列与并发${NC}"
-    printf '%b\n' "    net.core.somaxconn              = ${YELLOW}${SOMAXCONN}${NC}"
-    printf '%b\n' "    net.core.netdev_max_backlog     = ${YELLOW}${SOMAXCONN}${NC}"
-    printf '%b\n' "    net.ipv4.tcp_max_syn_backlog    = ${YELLOW}${SOMAXCONN}${NC}"
-    printf '%b\n' "    fs.file-max                     = ${YELLOW}${FILE_MAX}${NC}"
-    printf '%b\n' "  ${BLUE}▸ TIME_WAIT / 端口复用${NC}"
-    printf '%b\n' "    net.ipv4.tcp_tw_reuse           = ${YELLOW}1${NC}"
-    printf '%b\n' "    net.ipv4.tcp_timestamps         = ${YELLOW}1${NC}"
-    printf '%b\n' "    net.ipv4.tcp_fin_timeout         = ${YELLOW}30${NC}"
-    printf '%b\n' "    net.ipv4.tcp_max_tw_buckets      = ${YELLOW}500000${NC}"
-    printf '%b\n' "    net.ipv4.ip_local_port_range     = ${YELLOW}10000 65535${NC}"
-    printf '%b\n' "  ${BLUE}▸ Keepalive / 延迟${NC}"
-    printf '%b\n' "    net.ipv4.tcp_keepalive_time      = ${YELLOW}600${NC}"
-    printf '%b\n' "    net.ipv4.tcp_keepalive_intvl     = ${YELLOW}15${NC}"
-    printf '%b\n' "    net.ipv4.tcp_keepalive_probes    = ${YELLOW}5${NC}"
-    printf '%b\n' "    net.ipv4.tcp_notsent_lowat       = ${YELLOW}16384${NC}"
-    printf '%b\n' "    net.ipv4.tcp_mtu_probing         = ${YELLOW}1${NC}"
-    printf '%b\n' "  ${BLUE}▸ 系统与安全${NC}"
-    printf '%b\n' "    vm.swappiness                    = ${YELLOW}10${NC}"
-    printf '%b\n' "    net.ipv4.tcp_syncookies          = ${YELLOW}1${NC}"
-    if [[ -f /proc/sys/net/netfilter/nf_conntrack_max ]]; then
-        printf '%b\n' "    net.netfilter.nf_conntrack_max   = ${YELLOW}${CONNTRACK_MAX}${NC}"
-    fi
-    if [[ -f /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established ]]; then
-        printf '%b\n' "    conntrack established timeout    = ${YELLOW}7200${NC} 秒"
-    fi
-    if [[ -f /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_time_wait ]]; then
-        printf '%b\n' "    conntrack TIME_WAIT timeout      = ${YELLOW}120${NC} 秒"
-    fi
-    if [[ ! -e /proc/sys/net/netfilter/nf_conntrack_max ]]; then
-        printf '%b\n' "    conntrack                       = ${YELLOW}跳过（内核不支持）${NC}"
-    fi
-    separator
+    local bbr_status="跳过" conntrack_status="跳过" swap_status="按内存配置"
+    [[ "$BBR_AVAILABLE" = true ]] && bbr_status="启用"
+    [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]] && conntrack_status="按内存配置"
+    [[ -e "$SWAP_FILE" ]] && swap_status="已存在"
+    printf '%b\n' "${CYAN}  优化摘要：${NC}"
+    printf '%b\n' "    BBR/FQ：${YELLOW}%s${NC}，缓冲区上限：${YELLOW}%s${NC}" "$bbr_status" "$RMEM_MAX"
+    printf '%b\n' "    连接队列：${YELLOW}%s${NC}，网卡积压：${YELLOW}%s${NC}" "$SOMAXCONN" "$NETDEV_BACKLOG"
+    printf '%b\n' "    文件句柄：${YELLOW}%s${NC}，Conntrack：${YELLOW}%s${NC}" "$FILE_MAX" "$conntrack_status"
+    printf '%b\n' "    Swap：${YELLOW}%s${NC}" "$swap_status"
 }
+
 apply_optimizations() {
     section "应用网络优化配置：${VM_TIER}"
     show_optimization_plan
@@ -302,7 +264,7 @@ EOF
 
     # 3. 连接与队列上限
     add_conf "net.core.somaxconn" "$SOMAXCONN" "最大监听队列"
-    add_conf "net.core.netdev_max_backlog" "$SOMAXCONN" "网卡积压队列"
+    add_conf "net.core.netdev_max_backlog" "$NETDEV_BACKLOG" "网卡积压队列"
     add_conf "net.ipv4.tcp_max_syn_backlog" "$SOMAXCONN" "SYN半连接队列"
     add_conf "net.ipv4.tcp_notsent_lowat" "16384" "降低缓冲区未发送数据阈值 (降低延迟)"
 
@@ -360,7 +322,6 @@ apply_and_verify() {
         success "优化配置已应用。"
     fi
     printf '%b\n' "${CYAN}  当前生效参数${NC}"
-    separator
     printf '%b\n' "  拥塞控制 : ${YELLOW}${cc:-未知}${NC}"
     printf '%b\n' "  队列算法 : ${YELLOW}${qdisc:-未知}${NC}"
     if [ "$reuse" = "1" ]; then
@@ -368,13 +329,13 @@ apply_and_verify() {
     else
         printf '%b\n' "  TCP 复用  : ${RED}未启用${NC}"
     fi
-    separator
+    return "$sysctl_rc"
 }
 
 # --- 主逻辑 ---
 usage() {
     cat <<EOF
-Linux Network Optimizer v${SCRIPT_VERSION}
+Linux Network Optimizer ${SCRIPT_VERSION}
 
 用法：
   $0             应用网络优化
@@ -385,7 +346,7 @@ EOF
 
 main() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then usage; exit 0; fi
-    if [[ "${1:-}" == "restore" || "${1:-}" == "uninstall" ]]; then
+    if [[ $# -eq 1 && ("${1:-}" == "restore" || "${1:-}" == "uninstall") ]]; then
         require_root
         local backup
         backup=$(ls -t "${CONF_FILE}.bak_"* 2>/dev/null | head -n1 || true)
@@ -425,7 +386,7 @@ main() {
     fi
 
     printf '%b\n' "${CYAN}╭──────────────────────────────────────────────────────╮${NC}"
-    printf '%b\n' "${CYAN}│         Linux Network Optimizer v${SCRIPT_VERSION}          │${NC}"
+    printf '%b\n' "${CYAN}│         Linux Network Optimizer ${SCRIPT_VERSION}          │${NC}"
     printf '%b\n' "${CYAN}│              TCP / BBR / Proxy Edition              │${NC}"
     printf '%b\n' "${CYAN}╰──────────────────────────────────────────────────────╯${NC}"
     echo
