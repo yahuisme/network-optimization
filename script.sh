@@ -227,10 +227,13 @@ show_optimization_plan() {
     [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]] && conntrack_status="按内存配置"
     [[ -e "$SWAP_FILE" ]] && swap_status="已存在"
     printf '%b\n' "${CYAN}  优化摘要：${NC}"
-    printf '%b\n' "    BBR/FQ：${YELLOW}%s${NC}，缓冲区上限：${YELLOW}%s${NC}" "$bbr_status" "$RMEM_MAX"
-    printf '%b\n' "    连接队列：${YELLOW}%s${NC}，网卡积压：${YELLOW}%s${NC}" "$SOMAXCONN" "$NETDEV_BACKLOG"
-    printf '%b\n' "    文件句柄：${YELLOW}%s${NC}，Conntrack：${YELLOW}%s${NC}" "$FILE_MAX" "$conntrack_status"
-    printf '%b\n' "    Swap：${YELLOW}%s${NC}" "$swap_status"
+    printf '    BBR/FQ：%b%s%b，缓冲区上限：%b%s%b\n' \
+        "$YELLOW" "$bbr_status" "$NC" "$YELLOW" "$RMEM_MAX" "$NC"
+    printf '    连接队列：%b%s%b，网卡积压：%b%s%b\n' \
+        "$YELLOW" "$SOMAXCONN" "$NC" "$YELLOW" "$NETDEV_BACKLOG" "$NC"
+    printf '    文件句柄：%b%s%b，Conntrack：%b%s%b\n' \
+        "$YELLOW" "$FILE_MAX" "$NC" "$YELLOW" "$conntrack_status" "$NC"
+    printf '    Swap：%b%s%b\n' "$YELLOW" "$swap_status" "$NC"
 }
 
 apply_optimizations() {
