@@ -98,11 +98,19 @@ calculate_parameters() {
 }
 
 # --- 预检查函数 ---
-pre_flight_checks() {
+require_root() {
     if [[ $(id -u) -ne 0 ]]; then
-        printf '%b\n' "${RED}❌ 错误: 必须 root 权限。${NC}"
+        error "必须使用 root 权限运行。"
         exit 1
     fi
+}
+
+sysctl_supported() {
+    [[ -e "/proc/sys/${1//./\/}" ]]
+}
+
+pre_flight_checks() {
+    require_root
     # 加载必要的内核模块 (尤其是连接跟踪和BBR)
     modprobe nf_conntrack >/dev/null 2>&1 || true
     modprobe tcp_bbr >/dev/null 2>&1 || true
@@ -119,9 +127,13 @@ add_conf() {
     local value="$2"
     local comment="$3"
     local target="${CONF_WRITE_FILE:-$CONF_FILE}"
-    echo "# $comment" >> "$target"
-    echo "$key = $value" >> "$target"
-    echo "" >> "$target"
+    if ! sysctl_supported "$key"; then
+        return 0
+    fi
+    {
+        printf '# %s\n' "$comment"
+        printf '%s = %s\n\n' "$key" "$value"
+    } >> "$target"
 }
 
 # --- 备份管理 ---
@@ -138,7 +150,8 @@ manage_backups() {
 
 migrate_legacy_config() {
     if [[ -f "$LEGACY_CONF_FILE" ]]; then
-        local backup="${LEGACY_CONF_FILE}.migrated_$(date +%F_%H-%M-%S)"
+        local backup
+        backup="${LEGACY_CONF_FILE}.migrated_$(date +%F_%H-%M-%S)"
         cp "$LEGACY_CONF_FILE" "$backup"
         rm -f "$LEGACY_CONF_FILE"
         warning "已备份并停用旧配置：${LEGACY_CONF_FILE}"
@@ -174,15 +187,35 @@ configure_swap() {
         return
     fi
     if command -v fallocate >/dev/null 2>&1; then
-        fallocate -l "${swap_mb}M" "$SWAP_FILE"
-    else
-        dd if=/dev/zero of="$SWAP_FILE" bs=1M count="$swap_mb" status=none
+        if ! fallocate -l "${swap_mb}M" "$SWAP_FILE"; then
+            rm -f -- "$SWAP_FILE"
+            error "Swap 文件创建失败。"
+            return
+        fi
+    elif ! dd if=/dev/zero of="$SWAP_FILE" bs=1M count="$swap_mb" status=none; then
+        rm -f -- "$SWAP_FILE"
+        error "Swap 文件创建失败。"
+        return
     fi
-    chmod 600 "$SWAP_FILE"
-    mkswap "$SWAP_FILE" >/dev/null
-    swapon "$SWAP_FILE"
-    grep -qF "$SWAP_FILE none swap" /etc/fstab 2>/dev/null || \
-        echo "$SWAP_FILE none swap sw 0 0" >> /etc/fstab
+    if ! chmod 600 "$SWAP_FILE"; then
+        rm -f -- "$SWAP_FILE"
+        error "无法设置 Swap 文件权限，已清理残留文件。"
+        return
+    fi
+    if ! mkswap "$SWAP_FILE" >/dev/null || ! swapon "$SWAP_FILE"; then
+        swapoff "$SWAP_FILE" >/dev/null 2>&1 || true
+        rm -f -- "$SWAP_FILE"
+        error "Swap 初始化或启用失败，已清理残留文件。"
+        return
+    fi
+    if ! grep -qF "$SWAP_FILE none swap" /etc/fstab 2>/dev/null; then
+        if ! printf '%s\n' "$SWAP_FILE none swap sw 0 0" >> /etc/fstab; then
+            swapoff "$SWAP_FILE" >/dev/null 2>&1 || true
+            rm -f -- "$SWAP_FILE"
+            error "无法写入 /etc/fstab，已撤销并清理 Swap。"
+            return
+        fi
+    fi
     success "Swap 已启用：${swap_mb}MB"
 }
 
@@ -242,6 +275,7 @@ apply_optimizations() {
     section "应用网络优化配置：${VM_TIER}"
     show_optimization_plan
     local tmp_file="${CONF_FILE}.tmp.$$"
+    trap 'rm -f -- "$tmp_file"' ERR
     CONF_WRITE_FILE="$tmp_file"
     cat > "$tmp_file" << EOF
 # ==========================================================
@@ -258,7 +292,7 @@ EOF
     # 2. 缓冲区优化 (TCP & UDP) - 这对 Hysteria/QUIC 很重要
     add_conf "net.core.rmem_max" "$RMEM_MAX" "系统最大接收缓存"
     add_conf "net.core.wmem_max" "$WMEM_MAX" "系统最大发送缓存"
-    add_conf "net.core.rmem_default" "262144" "默认接收缓存 (256k)" 
+    add_conf "net.core.rmem_default" "262144" "默认接收缓存 (256k)"
     add_conf "net.core.wmem_default" "262144" "默认发送缓存 (256k)"
     # TCP 自动调优窗口
     add_conf "net.ipv4.tcp_rmem" "8192 262144 $TCP_MEM_MAX" "TCP读缓存 (min default max)"
@@ -306,6 +340,7 @@ EOF
     add_conf "net.ipv4.tcp_syncookies" "1" "防 SYN Flood"
     CONF_WRITE_FILE=""
     mv -f "$tmp_file" "$CONF_FILE"
+    trap - ERR
 }
 
 # --- 应用与验证 ---
@@ -351,6 +386,7 @@ EOF
 main() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then usage; exit 0; fi
     if [[ "${1:-}" == "restore" || "${1:-}" == "uninstall" ]]; then
+        require_root
         local backup
         backup=$(ls -t "${CONF_FILE}.bak_"* 2>/dev/null | head -n1 || true)
         if [[ "${1:-}" == "restore" && -n "$backup" ]]; then
