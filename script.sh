@@ -171,12 +171,12 @@ configure_swap() {
     fi
 
     # 计算当前总 Swap（含分区与 swapfile）
-    local current_total_mb=0 size_kb swap_line
+    local current_total_mb=0 size_bytes swap_line
     while IFS= read -r swap_line; do
         [[ -n "$swap_line" ]] || continue
-        size_kb=$(awk '{print $2}' <<< "$swap_line")
-        [[ "$size_kb" =~ ^[0-9]+$ ]] && current_total_mb=$((current_total_mb + size_kb / 1024))
-    done < <(swapon --show=NAME,SIZE --noheadings 2>/dev/null)
+        size_bytes=$(awk '{print $2}' <<< "$swap_line")
+        [[ "$size_bytes" =~ ^[0-9]+$ ]] && current_total_mb=$((current_total_mb + (size_bytes + 524288) / 1048576))
+    done < <(swapon --show=NAME,SIZE --bytes --noheadings 2>/dev/null)
 
     if [[ "$current_total_mb" -eq "$swap_mb" ]]; then
         printf '%b\n' "${GREEN}  ✔ 现有 Swap 与目标一致（${current_total_mb}MB），保留。${NC}"
