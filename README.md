@@ -2,7 +2,7 @@
 
 Linux TCP / BBR 网络优化脚本，面向代理节点 VPS。
 
-**版本：v26.08.27**
+**版本：v26.08.29**
 
 ## 使用
 
@@ -28,7 +28,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/network-optimizatio
 
 - 需要 root 权限。
 - 按内存自动调整代理节点的 TCP、UDP、队列和连接跟踪参数。
-- 无 Swap 时自动创建；已有 Swap 不修改。
+- 无 Swap 时按内存自动创建；已有 Swap 与目标不一致时统一替换为 `/swapfile`。
 - 配置文件：`/etc/sysctl.d/99-network-optimization.conf`。
 - 每次应用前保留最近 3 份配置备份。
 - `uninstall` 只删除本脚本的 sysctl 配置，不删除已创建的 Swap。

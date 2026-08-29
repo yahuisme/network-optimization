@@ -3,11 +3,11 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: v26.08.27
+# 版本: v26.08.29
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="v26.08.27"
+SCRIPT_VERSION="v26.08.29"
 
 set -euo pipefail
 
@@ -161,11 +161,6 @@ migrate_legacy_config() {
 }
 
 configure_swap() {
-    if swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
-        printf '%b\n' "${GREEN}  ✔ 已检测到现有 Swap，跳过创建。${NC}"
-        return
-    fi
-
     local swap_mb
     if [ "$TOTAL_MEM" -le 512 ]; then
         swap_mb=512
@@ -173,6 +168,24 @@ configure_swap() {
         swap_mb=1024
     else
         swap_mb=2048
+    fi
+
+    # 计算当前总 Swap（含分区与 swapfile）
+    local current_total_mb=0 size_kb swap_line
+    while IFS= read -r swap_line; do
+        [[ -n "$swap_line" ]] || continue
+        size_kb=$(awk '{print $2}' <<< "$swap_line")
+        [[ "$size_kb" =~ ^[0-9]+$ ]] && current_total_mb=$((current_total_mb + size_kb / 1024))
+    done < <(swapon --show=NAME,SIZE --noheadings 2>/dev/null)
+
+    if [[ "$current_total_mb" -eq "$swap_mb" ]]; then
+        printf '%b\n' "${GREEN}  ✔ 现有 Swap 与目标一致（${current_total_mb}MB），保留。${NC}"
+        return
+    fi
+    if [[ "$current_total_mb" -gt 0 ]]; then
+        printf '%b\n' "${YELLOW}  现有 Swap ${current_total_mb}MB 与目标 ${swap_mb}MB 不一致，将统一替换为 /swapfile。${NC}"
+    else
+        printf '%b\n' "${GREEN}  未检测到 Swap，将创建 ${swap_mb}MB。${NC}"
     fi
 
     local available_mb
@@ -184,30 +197,57 @@ configure_swap() {
 
     section "创建 Swap"
     step 1 2 "正在准备 ${swap_mb}MB Swap..."
-    if [[ -e "$SWAP_FILE" ]]; then
+    # 保护：/swapfile 存在但未启用时视为用户文件，不覆盖
+    if [[ -e "$SWAP_FILE" ]] && ! swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$SWAP_FILE"; then
         warning "${SWAP_FILE} 已存在但未启用，为避免覆盖用户文件，跳过创建。"
         return
     fi
+    local new_swap="${SWAP_FILE}.new.$$"
     if command -v fallocate >/dev/null 2>&1; then
-        if ! fallocate -l "${swap_mb}M" "$SWAP_FILE"; then
-            rm -f -- "$SWAP_FILE"
+        if ! fallocate -l "${swap_mb}M" "$new_swap"; then
+            rm -f -- "$new_swap"
             error "Swap 文件创建失败。"
             return
         fi
-    elif ! dd if=/dev/zero of="$SWAP_FILE" bs=1M count="$swap_mb" status=none; then
-        rm -f -- "$SWAP_FILE"
+    elif ! dd if=/dev/zero of="$new_swap" bs=1M count="$swap_mb" status=none; then
+        rm -f -- "$new_swap"
         error "Swap 文件创建失败。"
         return
     fi
-    if ! chmod 600 "$SWAP_FILE"; then
-        rm -f -- "$SWAP_FILE"
+    if ! chmod 600 "$new_swap"; then
+        rm -f -- "$new_swap"
         error "无法设置 Swap 文件权限，已清理残留文件。"
         return
     fi
-    if ! mkswap "$SWAP_FILE" >/dev/null || ! swapon "$SWAP_FILE"; then
-        swapoff "$SWAP_FILE" >/dev/null 2>&1 || true
+    if ! mkswap "$new_swap" >/dev/null; then
+        rm -f -- "$new_swap"
+        error "Swap 初始化失败，已清理残留文件。"
+        return
+    fi
+
+    step 2 2 "替换并启用 Swap..."
+    # 新文件就绪后，再关闭全部旧 Swap 并移除 fstab 条目（含分区 Swap）
+    if [[ "$current_total_mb" -gt 0 ]]; then
+        local active_swap
+        while IFS= read -r active_swap; do
+            [[ -n "$active_swap" ]] || continue
+            if ! swapoff "$active_swap" >/dev/null 2>&1; then
+                rm -f -- "$new_swap"
+                error "无法关闭现有 Swap：${active_swap}，中止替换。"
+                return
+            fi
+        done < <(swapon --show=NAME --noheadings 2>/dev/null)
+        sed -i -E '\|^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+[^[:space:]]+[[:space:]]+swap([[:space:]]|$)|d' /etc/fstab
         rm -f -- "$SWAP_FILE"
-        error "Swap 初始化或启用失败，已清理残留文件。"
+    fi
+    if ! mv -f "$new_swap" "$SWAP_FILE"; then
+        rm -f -- "$new_swap"
+        error "Swap 文件替换失败。"
+        return
+    fi
+    if ! swapon "$SWAP_FILE" >/dev/null; then
+        rm -f -- "$SWAP_FILE"
+        error "Swap 启用失败，已清理残留文件。"
         return
     fi
     if ! grep -qF "$SWAP_FILE none swap" /etc/fstab 2>/dev/null; then
@@ -225,7 +265,11 @@ show_optimization_plan() {
     local bbr_status="跳过" conntrack_status="跳过" swap_status="按内存配置"
     [[ "$BBR_AVAILABLE" = true ]] && bbr_status="启用"
     [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]] && conntrack_status="按内存配置"
-    [[ -e "$SWAP_FILE" ]] && swap_status="已存在"
+    if swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
+        swap_status="将按目标调整"
+    else
+        swap_status="将按内存创建"
+    fi
     printf '%b\n' "${CYAN}  优化摘要：${NC}"
     printf '    BBR/FQ：%b%s%b，缓冲区上限：%b%s%b\n' \
         "$YELLOW" "$bbr_status" "$NC" "$YELLOW" "$RMEM_MAX" "$NC"
