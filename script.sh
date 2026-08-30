@@ -3,11 +3,11 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: v26.08.29
+# 版本: v26.08.30
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="v26.08.29"
+SCRIPT_VERSION="v26.08.30"
 
 set -euo pipefail
 
@@ -37,8 +37,8 @@ SWAP_FILE="/swapfile"
 
 # --- 系统信息检测函数 ---
 get_system_info() {
-    TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}' | tr -d '\r')
-    CPU_CORES=$(nproc | tr -d '\r')
+    TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}')
+    CPU_CORES=$(nproc)
     
     if command -v systemd-detect-virt >/dev/null 2>&1; then
         VIRT_TYPE=$(systemd-detect-virt)
@@ -203,26 +203,21 @@ configure_swap() {
         return
     fi
     local new_swap="${SWAP_FILE}.new.$$"
-    if command -v fallocate >/dev/null 2>&1; then
-        if ! fallocate -l "${swap_mb}M" "$new_swap"; then
-            rm -f -- "$new_swap"
-            error "Swap 文件创建失败。"
-            return
-        fi
-    elif ! dd if=/dev/zero of="$new_swap" bs=1M count="$swap_mb" status=none; then
+    # fallocate 失败（如文件系统不支持）时回退 dd
+    if ! fallocate -l "${swap_mb}M" "$new_swap" 2>/dev/null && ! dd if=/dev/zero of="$new_swap" bs=1M count="$swap_mb" status=none 2>/dev/null; then
         rm -f -- "$new_swap"
         error "Swap 文件创建失败。"
-        return
+        return 1
     fi
     if ! chmod 600 "$new_swap"; then
         rm -f -- "$new_swap"
         error "无法设置 Swap 文件权限，已清理残留文件。"
-        return
+        return 1
     fi
     if ! mkswap "$new_swap" >/dev/null; then
         rm -f -- "$new_swap"
         error "Swap 初始化失败，已清理残留文件。"
-        return
+        return 1
     fi
 
     step 2 2 "替换并启用 Swap..."
@@ -234,7 +229,7 @@ configure_swap() {
             if ! swapoff "$active_swap" >/dev/null 2>&1; then
                 rm -f -- "$new_swap"
                 error "无法关闭现有 Swap：${active_swap}，中止替换。"
-                return
+                return 1
             fi
         done < <(swapon --show=NAME --noheadings 2>/dev/null)
         sed -i -E '\|^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+[^[:space:]]+[[:space:]]+swap([[:space:]]|$)|d' /etc/fstab
@@ -243,19 +238,19 @@ configure_swap() {
     if ! mv -f "$new_swap" "$SWAP_FILE"; then
         rm -f -- "$new_swap"
         error "Swap 文件替换失败。"
-        return
+        return 1
     fi
     if ! swapon "$SWAP_FILE" >/dev/null; then
         rm -f -- "$SWAP_FILE"
         error "Swap 启用失败，已清理残留文件。"
-        return
+        return 1
     fi
     if ! grep -qF "$SWAP_FILE none swap" /etc/fstab 2>/dev/null; then
         if ! printf '%s\n' "$SWAP_FILE none swap sw 0 0" >> /etc/fstab; then
             swapoff "$SWAP_FILE" >/dev/null 2>&1 || true
             rm -f -- "$SWAP_FILE"
             error "无法写入 /etc/fstab，已撤销并清理 Swap。"
-            return
+            return 1
         fi
     fi
     success "Swap 已启用：${swap_mb}MB"
@@ -327,20 +322,11 @@ EOF
     add_conf "net.ipv4.tcp_keepalive_intvl" "15" "探测间隔"
     add_conf "net.ipv4.tcp_keepalive_probes" "5" "探测次数"
 
-    # 6. 连接跟踪 (Conntrack)
-    # 如果模块未加载，写入配置可能会报错，这里做个判断（但通常文件写入没问题，是sysctl -p报错）
-    if [[ -f /proc/sys/net/netfilter/nf_conntrack_max ]]; then
-        add_conf "net.netfilter.nf_conntrack_max" "$CONNTRACK_MAX" "最大连接跟踪数"
-    fi
-    if [[ -f /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established ]]; then
-        add_conf "net.netfilter.nf_conntrack_tcp_timeout_established" "7200" "连接跟踪超时 (2小时)"
-    fi
-    if [[ -f /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_time_wait ]]; then
-        add_conf "net.netfilter.nf_conntrack_tcp_timeout_time_wait" "120" "减少 TIME_WAIT 跟踪时间"
-    fi
-    if [[ ! -e /proc/sys/net/netfilter/nf_conntrack_max ]]; then
-        warning "当前内核不支持 conntrack，跳过相关参数。"
-    fi
+    # 6. 连接跟踪 (Conntrack，add_conf 会自动跳过不支持的键)
+    add_conf "net.netfilter.nf_conntrack_max" "$CONNTRACK_MAX" "最大连接跟踪数"
+    add_conf "net.netfilter.nf_conntrack_tcp_timeout_established" "7200" "连接跟踪超时 (2小时)"
+    add_conf "net.netfilter.nf_conntrack_tcp_timeout_time_wait" "120" "减少 TIME_WAIT 跟踪时间"
+    [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]] || warning "当前内核不支持 conntrack，跳过相关参数。"
 
     # 7. 其他系统级优化
     add_conf "fs.file-max" "$FILE_MAX" "最大文件句柄"
@@ -381,7 +367,9 @@ apply_and_verify() {
 
 # --- 主逻辑 ---
 usage() {
-    cat <<EOF
+    local out=/dev/stdout
+    [[ "${1:-0}" -eq 0 ]] || out=/dev/stderr
+    cat > "$out" <<EOF
 Linux Network Optimizer ${SCRIPT_VERSION}
 
 用法：
@@ -392,7 +380,7 @@ EOF
 }
 
 main() {
-    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then usage; exit 0; fi
+    if [[ $# -eq 1 && ("${1:-}" == "--help" || "${1:-}" == "-h") ]]; then usage; exit 0; fi
     if [[ $# -eq 1 && ("${1:-}" == "restore" || "${1:-}" == "uninstall") ]]; then
         require_root
         local backup
@@ -428,7 +416,7 @@ main() {
     fi
     if [[ $# -gt 0 ]]; then
         error "未知参数：$1"
-        usage
+        usage 1
         exit 2
     fi
 
