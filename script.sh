@@ -3,11 +3,11 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: v26.08.30
+# 版本: v26.09.02
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="v26.08.30"
+SCRIPT_VERSION="v26.09.02"
 
 set -euo pipefail
 
@@ -17,17 +17,37 @@ RED=$'\033[0;31m'
 YELLOW=$'\033[1;33m'
 CYAN=$'\033[0;36m'
 BLUE=$'\033[0;34m'
+BOLD=$'\033[1m'
 NC=$'\033[0m'
 BBR_AVAILABLE=false
 CONF_WRITE_FILE=""
 
 # --- 统一输出样式 ---
 
-success() { printf '\n%b[✔] %s%b\n\n' "$GREEN" "$1" "$NC" >&2; }
-warning() { printf '\n%b[⚠] %s%b\n\n' "$YELLOW" "$1" "$NC" >&2; }
-error() { printf '\n%b[✖] %s%b\n\n' "$RED" "$1" "$NC" >&2; }
-section() { printf '\n%b>>> %s%b\n' "$CYAN" "$1" "$NC"; }
-step() { printf '%b  [%s/%s]%b %s\n' "$BLUE" "$1" "$2" "$NC" "$3"; }
+success() { printf '\n%b  [✔] %s%b\n\n' "$GREEN" "$1" "$NC" >&2; }
+warning() { printf '\n%b  [⚠] %s%b\n\n' "$YELLOW" "$1" "$NC" >&2; }
+error() { printf '\n%b  [✖] %s%b\n\n' "$RED" "$1" "$NC" >&2; }
+
+display_width() {
+    # 估算字符串的终端显示宽度（中文等宽字符按 2 列计），用于对齐；自动剥离 ANSI 颜色码
+    local s="$1" n ascii
+    s=$(printf '%s' "$s" | sed -r 's/\x1B\[[0-9;]*[mK]//g')
+    n=$(printf '%s' "$s" | LC_ALL=C.UTF-8 wc -m 2>/dev/null)
+    [[ "$n" =~ ^[0-9]+$ ]] || n=$(printf '%s' "$s" | wc -m)
+    ascii=$(printf '%s' "$s" | LC_ALL=C tr -d '\200-\377' | wc -c)
+    echo $((2 * n - ascii))
+}
+
+section() {
+    local title="$1" fill
+    fill=$((44 - $(display_width "$title"))); (( fill < 1 )) && fill=1
+    printf '\n%b╭──────────────────────────────────────────────╮%b\n' "$CYAN" "$NC"
+    printf '%b│  %b%s%b' "$CYAN" "$BOLD" "$title" "$NC"
+    printf '%*s' "$fill" ""
+    printf '%b│%b\n' "$CYAN" "$NC"
+    printf '%b╰──────────────────────────────────────────────╯%b\n' "$CYAN" "$NC"
+}
+step() { printf '%b  [%s/%s] %s%b\n' "$BLUE" "$1" "$2" "$3" "$NC"; }
 
 
 # --- 配置文件路径 ---
@@ -179,13 +199,13 @@ configure_swap() {
     done < <(swapon --show=NAME,SIZE --bytes --noheadings 2>/dev/null)
 
     if [[ "$current_total_mb" -eq "$swap_mb" ]]; then
-        printf '%b\n' "${GREEN}  ✔ 现有 Swap 与目标一致（${current_total_mb}MB），保留。${NC}"
+        success "现有 Swap 与目标一致（${current_total_mb}MB），保留。"
         return
     fi
     if [[ "$current_total_mb" -gt 0 ]]; then
-        printf '%b\n' "${YELLOW}  现有 Swap ${current_total_mb}MB 与目标 ${swap_mb}MB 不一致，将统一替换为 /swapfile。${NC}"
+        warning "现有 Swap ${current_total_mb}MB 与目标 ${swap_mb}MB 不一致，将统一替换为 /swapfile。"
     else
-        printf '%b\n' "${GREEN}  未检测到 Swap，将创建 ${swap_mb}MB。${NC}"
+        success "未检测到 Swap，将创建 ${swap_mb}MB。"
     fi
 
     local available_mb
@@ -203,6 +223,13 @@ configure_swap() {
         return
     fi
     local new_swap="${SWAP_FILE}.new.$$"
+    # 清理上次运行可能残留的临时 Swap 文件（已格式化但未启用）
+    for stale_swap in "${SWAP_FILE}.new"*; do
+        [[ -e "$stale_swap" ]] || continue
+        [[ "$stale_swap" = "$new_swap" ]] && continue
+        swapoff "$stale_swap" 2>/dev/null || true
+        rm -f -- "$stale_swap"
+    done
     # fallocate 失败（如文件系统不支持）时回退 dd
     if ! fallocate -l "${swap_mb}M" "$new_swap" 2>/dev/null && ! dd if=/dev/zero of="$new_swap" bs=1M count="$swap_mb" status=none 2>/dev/null; then
         rm -f -- "$new_swap"
@@ -232,7 +259,7 @@ configure_swap() {
                 return 1
             fi
         done < <(swapon --show=NAME --noheadings 2>/dev/null)
-        sed -i -E '\|^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+[^[:space:]]+[[:space:]]+swap([[:space:]]|$)|d' /etc/fstab
+        sed -i -E '\|^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+[^[:space:]]+[[:space:]]+swap([[:space:]]\|$)|d' /etc/fstab
         rm -f -- "$SWAP_FILE"
     fi
     if ! mv -f "$new_swap" "$SWAP_FILE"; then
@@ -256,6 +283,15 @@ configure_swap() {
     success "Swap 已启用：${swap_mb}MB"
 }
 
+print_opt_line() {
+    # 摘要行：标签按显示宽度填充到 13 列，冒号对齐
+    local label="$1" value="$2" pad
+    pad=$((13 - $(display_width "$label"))); (( pad < 1 )) && pad=1
+    printf '    %s' "$label"
+    printf '%*s' "$pad" ""
+    printf ': %b%s%b\n' "$YELLOW" "$value" "$NC"
+}
+
 show_optimization_plan() {
     local bbr_status="跳过" conntrack_status="跳过" swap_status="按内存配置"
     [[ "$BBR_AVAILABLE" = true ]] && bbr_status="启用"
@@ -265,14 +301,14 @@ show_optimization_plan() {
     else
         swap_status="将按内存创建"
     fi
-    printf '%b\n' "${CYAN}  优化摘要：${NC}"
-    printf '    BBR/FQ：%b%s%b，缓冲区上限：%b%s%b\n' \
-        "$YELLOW" "$bbr_status" "$NC" "$YELLOW" "$RMEM_MAX" "$NC"
-    printf '    连接队列：%b%s%b，网卡积压：%b%s%b\n' \
-        "$YELLOW" "$SOMAXCONN" "$NC" "$YELLOW" "$NETDEV_BACKLOG" "$NC"
-    printf '    文件句柄：%b%s%b，Conntrack：%b%s%b\n' \
-        "$YELLOW" "$FILE_MAX" "$NC" "$YELLOW" "$conntrack_status" "$NC"
-    printf '    Swap：%b%s%b\n' "$YELLOW" "$swap_status" "$NC"
+    printf '%b\n' "${BOLD}  优化摘要：${NC}"
+    print_opt_line "BBR/FQ" "$bbr_status"
+    print_opt_line "缓冲区上限" "$RMEM_MAX"
+    print_opt_line "连接队列" "$SOMAXCONN"
+    print_opt_line "网卡积压" "$NETDEV_BACKLOG"
+    print_opt_line "文件句柄" "$FILE_MAX"
+    print_opt_line "Conntrack" "$conntrack_status"
+    print_opt_line "Swap" "$swap_status"
 }
 
 apply_optimizations() {
@@ -354,7 +390,7 @@ apply_and_verify() {
     else
         success "优化配置已应用。"
     fi
-    printf '%b\n' "${CYAN}  当前生效参数${NC}"
+    printf '%b\n' "${BOLD}  当前生效参数${NC}"
     printf '%b\n' "  拥塞控制 : ${YELLOW}${cc:-未知}${NC}"
     printf '%b\n' "  队列算法 : ${YELLOW}${qdisc:-未知}${NC}"
     if [ "$reuse" = "1" ]; then
@@ -363,6 +399,19 @@ apply_and_verify() {
         printf '%b\n' "  TCP 复用  : ${RED}未启用${NC}"
     fi
     return "$sysctl_rc"
+}
+
+banner_line() {
+    # Banner 居中行（框宽 56，内部可用 54 列）
+    local text="$1" l r w
+    w=$(display_width "$text")
+    l=$(( (54 - w) / 2 )); (( l < 1 )) && l=1
+    r=$((54 - w - l)); (( r < 1 )) && r=1
+    printf '%b│%b' "$CYAN" "$NC"
+    printf '%*s' "$l" ""
+    printf '%b%b%s%b' "$CYAN" "$BOLD" "$text" "$NC"
+    printf '%*s' "$r" ""
+    printf '%b│%b\n' "$CYAN" "$NC"
 }
 
 # --- 主逻辑 ---
@@ -388,7 +437,10 @@ main() {
         if [[ "${1:-}" == "restore" && -n "$backup" ]]; then
             section "恢复备份"
             step 1 2 "正在恢复：$backup"
-            cp "$backup" "$CONF_FILE"
+            if ! cp "$backup" "$CONF_FILE"; then
+                error "备份恢复失败：$backup"
+                exit 1
+            fi
             step 2 2 "正在重新加载 sysctl..."
             if sysctl --system >/dev/null 2>&1; then
                 success "已恢复配置文件并重新加载系统参数：$backup"
@@ -421,8 +473,8 @@ main() {
     fi
 
     printf '%b\n' "${CYAN}╭──────────────────────────────────────────────────────╮${NC}"
-    printf '%b\n' "${CYAN}│         Linux Network Optimizer ${SCRIPT_VERSION}          │${NC}"
-    printf '%b\n' "${CYAN}│              TCP / BBR / Proxy Edition              │${NC}"
+    banner_line "Linux Network Optimizer ${SCRIPT_VERSION}"
+    banner_line "TCP / BBR / Proxy Edition"
     printf '%b\n' "${CYAN}╰──────────────────────────────────────────────────────╯${NC}"
     echo
     pre_flight_checks
