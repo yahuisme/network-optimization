@@ -3,11 +3,11 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: v26.09.02
+# 版本: v26.09.03
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="v26.09.02"
+SCRIPT_VERSION="v26.09.03"
 
 set -euo pipefail
 
@@ -28,32 +28,10 @@ success() { printf '\n%b  [✔] %s%b\n\n' "$GREEN" "$1" "$NC" >&2; }
 warning() { printf '\n%b  [⚠] %s%b\n\n' "$YELLOW" "$1" "$NC" >&2; }
 error() { printf '\n%b  [✖] %s%b\n\n' "$RED" "$1" "$NC" >&2; }
 
-display_width() {
-    # 估算字符串的终端显示宽度（中文等宽字符按 2 列计），用于对齐；自动剥离 ANSI 颜色码。
-    # 按字节解析 UTF-8，不依赖系统 locale（C locale 下同样正确）。
-    local s="$1"
-    s=$(printf '%s' "$s" | sed -r 's/\x1B\[[0-9;]*[mK]//g')
-    printf '%s' "$s" | od -An -v -tu1 | awk '
-    {
-        for (i = 1; i <= NF; i++) {
-            b = $i
-            if (b >= 192) { w += 2 }        # UTF-8 多字节首字节：按 2 列
-            else if (b < 128) { w += 1 }    # ASCII：1 列
-        }                                   # 128-191 续字节：跳过
-    }
-    END { print w }'
-}
-
 section() {
-    local title="$1" fill
-    fill=$((44 - $(display_width "$title"))); (( fill < 1 )) && fill=1
-    printf '\n%b╭──────────────────────────────────────────────╮%b\n' "$CYAN" "$NC"
-    printf '%b│  %b%s%b' "$CYAN" "$BOLD" "$title" "$NC"
-    printf '%*s' "$fill" ""
-    printf '%b│%b\n' "$CYAN" "$NC"
-    printf '%b╰──────────────────────────────────────────────╯%b\n' "$CYAN" "$NC"
+    printf '\n%b==> %b%s%b\n' "$CYAN" "$BOLD" "$1" "$NC"
 }
-step() { printf '%b  [%s/%s] %s%b\n' "$BLUE" "$1" "$2" "$3" "$NC"; }
+step() { printf '%b  -> [%s/%s] %s%b\n' "$BLUE" "$1" "$2" "$3" "$NC"; }
 
 
 # --- 配置文件路径 ---
@@ -289,15 +267,6 @@ configure_swap() {
     success "Swap 已启用：${swap_mb}MB"
 }
 
-print_opt_line() {
-    # 摘要行：标签按显示宽度填充到 13 列，冒号对齐
-    local label="$1" value="$2" pad
-    pad=$((13 - $(display_width "$label"))); (( pad < 1 )) && pad=1
-    printf '    %s' "$label"
-    printf '%*s' "$pad" ""
-    printf ': %b%s%b\n' "$YELLOW" "$value" "$NC"
-}
-
 show_optimization_plan() {
     local bbr_status="跳过" conntrack_status="跳过" swap_status="按内存配置"
     [[ "$BBR_AVAILABLE" = true ]] && bbr_status="启用"
@@ -307,14 +276,14 @@ show_optimization_plan() {
     else
         swap_status="将按内存创建"
     fi
-    printf '%b\n' "${BOLD}  优化摘要：${NC}"
-    print_opt_line "BBR/FQ" "$bbr_status"
-    print_opt_line "缓冲区上限" "$RMEM_MAX"
-    print_opt_line "连接队列" "$SOMAXCONN"
-    print_opt_line "网卡积压" "$NETDEV_BACKLOG"
-    print_opt_line "文件句柄" "$FILE_MAX"
-    print_opt_line "Conntrack" "$conntrack_status"
-    print_opt_line "Swap" "$swap_status"
+    printf '%b\n' "${BOLD}  优化参数规划：${NC}"
+    printf '    • %-10s : %b%s%b\n' "BBR/FQ" "$YELLOW" "$bbr_status" "$NC"
+    printf '    • %-10s : %b%s%b\n' "缓冲区上限" "$YELLOW" "$RMEM_MAX" "$NC"
+    printf '    • %-10s : %b%s%b\n' "连接队列" "$YELLOW" "$SOMAXCONN" "$NC"
+    printf '    • %-10s : %b%s%b\n' "网卡积压" "$YELLOW" "$NETDEV_BACKLOG" "$NC"
+    printf '    • %-10s : %b%s%b\n' "文件句柄" "$YELLOW" "$FILE_MAX" "$NC"
+    printf '    • %-10s : %b%s%b\n' "Conntrack" "$YELLOW" "$conntrack_status" "$NC"
+    printf '    • %-10s : %b%s%b\n' "Swap" "$YELLOW" "$swap_status" "$NC"
 }
 
 apply_optimizations() {
@@ -407,19 +376,6 @@ apply_and_verify() {
     return "$sysctl_rc"
 }
 
-banner_line() {
-    # Banner 居中行（框宽 56，内部可用 54 列）
-    local text="$1" l r w
-    w=$(display_width "$text")
-    l=$(( (54 - w) / 2 )); (( l < 1 )) && l=1
-    r=$((54 - w - l)); (( r < 1 )) && r=1
-    printf '%b│%b' "$CYAN" "$NC"
-    printf '%*s' "$l" ""
-    printf '%b%b%s%b' "$CYAN" "$BOLD" "$text" "$NC"
-    printf '%*s' "$r" ""
-    printf '%b│%b\n' "$CYAN" "$NC"
-}
-
 # --- 主逻辑 ---
 usage() {
     local out=/dev/stdout
@@ -478,11 +434,7 @@ main() {
         exit 2
     fi
 
-    printf '%b\n' "${CYAN}╭──────────────────────────────────────────────────────╮${NC}"
-    banner_line "Linux Network Optimizer ${SCRIPT_VERSION}"
-    banner_line "TCP / BBR / Proxy Edition"
-    printf '%b\n' "${CYAN}╰──────────────────────────────────────────────────────╯${NC}"
-    echo
+    printf '%b\n' "${CYAN}${BOLD}==> Linux Network Optimizer ${SCRIPT_VERSION} (TCP / BBR / Proxy Edition)${NC}"
     pre_flight_checks
     get_system_info
     configure_swap
