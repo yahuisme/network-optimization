@@ -3,11 +3,11 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: v26.09.03
+# 版本: v26.09.04
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="v26.09.03"
+SCRIPT_VERSION="v26.09.04"
 
 set -euo pipefail
 
@@ -24,9 +24,9 @@ CONF_WRITE_FILE=""
 
 # --- 统一输出样式 ---
 
-success() { printf '\n%b  [✔] %s%b\n\n' "$GREEN" "$1" "$NC" >&2; }
-warning() { printf '\n%b  [⚠] %s%b\n\n' "$YELLOW" "$1" "$NC" >&2; }
-error() { printf '\n%b  [✖] %s%b\n\n' "$RED" "$1" "$NC" >&2; }
+success() { printf '%b  [✔] %s%b\n' "$GREEN" "$1" "$NC"; }
+warning() { printf '%b  [⚠] %s%b\n' "$YELLOW" "$1" "$NC" >&2; }
+error() { printf '%b  [✖] %s%b\n' "$RED" "$1" "$NC" >&2; }
 
 section() {
     printf '\n%b==> %b%s%b\n' "$CYAN" "$BOLD" "$1" "$NC"
@@ -215,7 +215,8 @@ configure_swap() {
         rm -f -- "$stale_swap"
     done
     # fallocate 失败（如文件系统不支持）时回退 dd
-    if ! fallocate -l "${swap_mb}M" "$new_swap" 2>/dev/null && ! dd if=/dev/zero of="$new_swap" bs=1M count="$swap_mb" status=none 2>/dev/null; then
+    if ! { command -v fallocate &>/dev/null && fallocate -l "${swap_mb}M" "$new_swap" 2>/dev/null; } && \
+       ! dd if=/dev/zero of="$new_swap" bs=1M count="$swap_mb" status=none 2>/dev/null; then
         rm -f -- "$new_swap"
         error "Swap 文件创建失败。"
         return 1
@@ -256,7 +257,7 @@ configure_swap() {
         error "Swap 启用失败，已清理残留文件。"
         return 1
     fi
-    if ! grep -qF "$SWAP_FILE none swap" /etc/fstab 2>/dev/null; then
+    if ! grep -Eq "^[[:space:]]*${SWAP_FILE}[[:space:]]+" /etc/fstab 2>/dev/null; then
         if ! printf '%s\n' "$SWAP_FILE none swap sw 0 0" >> /etc/fstab; then
             swapoff "$SWAP_FILE" >/dev/null 2>&1 || true
             rm -f -- "$SWAP_FILE"
@@ -288,7 +289,6 @@ show_optimization_plan() {
 
 apply_optimizations() {
     section "应用网络优化配置：${VM_TIER}"
-    show_optimization_plan
     local tmp_file="${CONF_FILE}.tmp.$$"
     trap 'rm -f -- "$tmp_file"' ERR
     CONF_WRITE_FILE="$tmp_file"
@@ -356,6 +356,7 @@ apply_and_verify() {
     local sysctl_rc=0
     sysctl --system >/dev/null 2>&1 || sysctl_rc=$?
 
+    step 2 2 "正在验证生效参数..."
     local cc qdisc reuse
     cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
     qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
@@ -365,7 +366,7 @@ apply_and_verify() {
     else
         success "优化配置已应用。"
     fi
-    printf '%b\n' "${BOLD}  当前生效参数${NC}"
+    printf '\n%b\n' "${BOLD}  当前生效参数${NC}"
     printf '%b\n' "  拥塞控制 : ${YELLOW}${cc:-未知}${NC}"
     printf '%b\n' "  队列算法 : ${YELLOW}${qdisc:-未知}${NC}"
     if [ "$reuse" = "1" ]; then
@@ -391,52 +392,70 @@ EOF
 }
 
 main() {
-    if [[ $# -eq 1 && ("${1:-}" == "--help" || "${1:-}" == "-h") ]]; then usage; exit 0; fi
-    if [[ $# -eq 1 && ("${1:-}" == "restore" || "${1:-}" == "uninstall") ]]; then
-        require_root
-        local backup
-        backup=$(ls -t "${CONF_FILE}.bak_"* 2>/dev/null | head -n1 || true)
-        if [[ "${1:-}" == "restore" && -n "$backup" ]]; then
-            section "恢复备份"
-            step 1 2 "正在恢复：$backup"
-            if ! cp "$backup" "$CONF_FILE"; then
-                error "备份恢复失败：$backup"
+    case "${1:-}" in
+        -h|--help)
+            if [[ $# -ne 1 ]]; then
+                error "选项 $1 不接受多余参数"
+                usage 1
+                exit 2
+            fi
+            usage 0
+            exit 0
+            ;;
+        restore|uninstall)
+            if [[ $# -ne 1 ]]; then
+                error "选项 $1 不接受多余参数"
+                usage 1
+                exit 2
+            fi
+            require_root
+            local backup
+            backup=$(ls -t "${CONF_FILE}.bak_"* 2>/dev/null | head -n1 || true)
+            if [[ "$1" == "restore" && -n "$backup" ]]; then
+                section "恢复备份"
+                step 1 2 "正在恢复：$backup"
+                if ! cp "$backup" "$CONF_FILE"; then
+                    error "备份恢复失败：$backup"
+                    exit 1
+                fi
+                step 2 2 "正在重新加载 sysctl..."
+                if sysctl --system >/dev/null 2>&1; then
+                    success "已恢复配置文件并重新加载系统参数：$backup"
+                else
+                    error "配置文件已恢复，但系统参数重新加载失败。"
+                    exit 1
+                fi
+                exit 0
+            elif [[ "$1" == "restore" ]]; then
+                warning "未找到可恢复的备份。"
                 exit 1
             fi
+            section "卸载网络优化"
+            warning "将删除优化配置并重新加载系统参数。"
+            step 1 2 "正在删除：$CONF_FILE"
+            rm -f "$CONF_FILE"
             step 2 2 "正在重新加载 sysctl..."
             if sysctl --system >/dev/null 2>&1; then
-                success "已恢复配置文件并重新加载系统参数：$backup"
+                success "网络优化配置已删除并重新加载系统参数。"
             else
-                error "配置文件已恢复，但系统参数重新加载失败。"
+                error "网络优化配置已删除，但系统参数重新加载失败。"
                 exit 1
             fi
             exit 0
-        elif [[ "${1:-}" == "restore" ]]; then
-            warning "未找到可恢复的备份。"
-            exit 1
-        fi
-        section "卸载网络优化"
-        warning "将删除优化配置并重新加载系统参数。"
-        step 1 2 "正在删除：$CONF_FILE"
-        rm -f "$CONF_FILE"
-        step 2 2 "正在重新加载 sysctl..."
-        if sysctl --system >/dev/null 2>&1; then
-            success "网络优化配置已删除并重新加载系统参数。"
-        else
-            error "网络优化配置已删除，但系统参数重新加载失败。"
-            exit 1
-        fi
-        exit 0
-    fi
-    if [[ $# -gt 0 ]]; then
-        error "未知参数：$1"
-        usage 1
-        exit 2
-    fi
+            ;;
+        "")
+            ;;
+        *)
+            error "未知参数：$1"
+            usage 1
+            exit 2
+            ;;
+    esac
 
     printf '%b\n' "${CYAN}${BOLD}==> Linux Network Optimizer ${SCRIPT_VERSION} (TCP / BBR / Proxy Edition)${NC}"
     pre_flight_checks
     get_system_info
+    show_optimization_plan
     configure_swap
     migrate_legacy_config
     manage_backups
