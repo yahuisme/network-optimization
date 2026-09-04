@@ -382,7 +382,7 @@ usage() {
     local out=/dev/stdout
     [[ "${1:-0}" -eq 0 ]] || out=/dev/stderr
     cat > "$out" <<EOF
-Linux Network Optimizer ${SCRIPT_VERSION}
+VPS Network Optimizer ${SCRIPT_VERSION}
 
 用法：
   $0             应用网络优化
@@ -452,7 +452,7 @@ main() {
             ;;
     esac
 
-    printf '%b\n' "${CYAN}${BOLD}==> Linux Network Optimizer ${SCRIPT_VERSION} (TCP / BBR / Proxy Edition)${NC}"
+    printf '%b\n' "${CYAN}${BOLD}==> VPS Network Optimizer ${SCRIPT_VERSION} (TCP / BBR / Proxy Edition)${NC}"
     pre_flight_checks
     get_system_info
     show_optimization_plan
