@@ -3,13 +3,13 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: v26.09.04
+# 版本: v26.09.06
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="v26.09.04"
+SCRIPT_VERSION="v26.09.06"
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # --- 颜色定义 ---
 GREEN=$'\033[0;32m'
@@ -410,7 +410,9 @@ main() {
             fi
             require_root
             local backup
-            backup=$(ls -t "${CONF_FILE}.bak_"* 2>/dev/null | head -n1 || true)
+            backup=$(find "$(dirname "$CONF_FILE")" -maxdepth 1 -type f \
+                -name "$(basename "$CONF_FILE").bak_*" -printf '%T@ %p\n' 2>/dev/null \
+                | sort -nr | head -n1 | cut -d' ' -f2-)
             if [[ "$1" == "restore" && -n "$backup" ]]; then
                 section "恢复备份"
                 step 1 2 "正在恢复：$backup"
