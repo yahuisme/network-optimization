@@ -186,7 +186,7 @@ configure_swap() {
         return
     fi
     if [[ "$current_total_mb" -gt 0 ]]; then
-        warning "现有 Swap ${current_total_mb}MB 与目标 ${swap_mb}MB 不一致，将统一替换为 /swapfile。"
+        warning "Swap 当前 ${current_total_mb}MB，目标 ${swap_mb}MB；将停用全部现有 Swap（含分区），统一改用 /swapfile 及其启动条目。"
     else
         printf '  未检测到 Swap，将创建 %sMiB。\n' "$swap_mb"
     fi
@@ -308,7 +308,7 @@ show_optimization_plan() {
     [[ "$BBR_AVAILABLE" = true ]] && bbr_status="启用"
     [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]] && conntrack_status="${CONNTRACK_MAX}"
     if swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
-        swap_status="将按目标调整"
+        swap_status="容量一致时保留，否则停用全部（含分区）并替换为 /swapfile"
     else
         swap_status="将按内存创建"
     fi
@@ -511,6 +511,7 @@ VPS 网络优化 ${SCRIPT_VERSION}
   $0 --help      显示帮助（无需 root）
 
 restore/uninstall 需要 root；不撤销 Swap 或旧配置迁移。
+默认执行不另行确认；Swap 容量不一致时停用全部现有 Swap（含分区）并替换为 /swapfile。
 EOF
 }
 

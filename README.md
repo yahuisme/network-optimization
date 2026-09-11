@@ -27,6 +27,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/network-optimizatio
 ## 说明
 
 - 需要 root，按内存调整 TCP、UDP、队列和连接跟踪参数，仅写入内核支持的键。
+- 默认执行不另行确认。Swap 目标：内存 ≤512 MiB 时为 512 MiB，≤1024 MiB 时为 1024 MiB，否则为 2048 MiB；现有总量一致则保留。
 - 无 Swap 时自动创建；现有容量不匹配时统一替换为 `/swapfile`，包含停用分区 Swap。空间不足或目标是未启用的已有文件时跳过。
 - Swap 替换失败时恢复旧文件、启动配置和活动状态；恢复失败会报告并保留恢复文件。
 - 配置文件：`/etc/sysctl.d/99-network-optimization.conf`，保留最近 3 份唯一命名的备份。
