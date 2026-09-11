@@ -3,11 +3,11 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: v26.09.10
+# 版本: v26.09.11
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="v26.09.10"
+SCRIPT_VERSION="v26.09.11"
 
 set -Eeuo pipefail
 
@@ -158,7 +158,7 @@ migrate_legacy_config() {
         LEGACY_BACKUP=$(mktemp "${LEGACY_CONF_FILE}.migrated_XXXXXX") || return 1
         cp -p -- "$LEGACY_CONF_FILE" "$LEGACY_BACKUP" || return 1
         rm -f -- "$LEGACY_CONF_FILE" || return 1
-        warning "已备份并停用旧配置：${LEGACY_CONF_FILE}"
+        warning "已停用旧配置：${LEGACY_CONF_FILE}；备份：${LEGACY_BACKUP}"
     fi
 }
 
@@ -306,14 +306,15 @@ configure_swap() {
 show_optimization_plan() {
     local bbr_status="跳过" conntrack_status="跳过" swap_status="按内存配置"
     [[ "$BBR_AVAILABLE" = true ]] && bbr_status="启用"
-    [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]] && conntrack_status="按内存配置"
+    [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]] && conntrack_status="${CONNTRACK_MAX}"
     if swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
         swap_status="将按目标调整"
     else
         swap_status="将按内存创建"
     fi
     printf '%b\n' "${BOLD}  优化参数规划：${NC}"
-    printf '  %s：%s\n' "BBR/FQ" "$bbr_status"
+    printf '  %s：%s\n' "BBR" "$bbr_status"
+    printf '  %s：%s\n' "队列算法" "fq（内核支持时配置）"
     printf '  %s：%s\n' "缓冲区上限" "$((RMEM_MAX / 1048576)) MiB"
     printf '  %s：%s\n' "连接队列" "$SOMAXCONN"
     printf '  %s：%s\n' "网卡积压" "$NETDEV_BACKLOG"
@@ -412,7 +413,13 @@ apply_and_verify() {
             [[ "$rc" -ne 0 ]] || rc=1
         fi
     done <<< "$targets"
-    if [[ "$rc" -eq 0 ]]; then success "生成的配置已逐项验证生效。"; fi
+    if [[ "$rc" -eq 0 ]]; then
+        success "生成的配置已逐项验证生效。"
+        printf '  %s：%s\n' "拥塞控制" "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '无法读取')"
+        printf '  %s：%s\n' "队列算法" "$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '无法读取')"
+        printf '  %s：%s\n' "TCP 复用" "$(sysctl -n net.ipv4.tcp_tw_reuse 2>/dev/null || echo '无法读取')"
+        printf '  %s：%s\n' "配置文件" "$CONF_FILE"
+    fi
     return "$rc"
 }
 
