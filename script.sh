@@ -7,7 +7,7 @@
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="v26.09.11"
+SCRIPT_VERSION="v26.09.15"
 
 set -Eeuo pipefail
 
@@ -378,7 +378,18 @@ EOF
     [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]] || warning "当前内核不支持 conntrack，跳过相关参数。"
 
     # 7. 其他系统级优化
-    add_conf "fs.file-max" "$FILE_MAX" "最大文件句柄" || return 1
+    if sysctl_supported "fs.file-max"; then
+        local current_file_max
+        if ! current_file_max=$(sysctl -n fs.file-max) ||
+           ! file_max_at_least "$current_file_max" 0; then
+            error "无法读取有效的 fs.file-max，未生成配置。"
+            return 1
+        fi
+        if file_max_at_least "$current_file_max" "$FILE_MAX"; then
+            FILE_MAX=$current_file_max
+        fi
+    fi
+    add_conf "fs.file-max" "$FILE_MAX" "最大文件句柄（保留现有更高上限）" || return 1
     add_conf "vm.swappiness" "10" "减少 Swap 使用" || return 1
     add_conf "net.ipv4.tcp_mtu_probing" "1" "开启 MTU 探测 (解决部分网络卡顿)" || return 1
     add_conf "net.ipv4.tcp_syncookies" "1" "防 SYN Flood" || return 1
@@ -396,6 +407,16 @@ config_targets() {
 
 normalize_value() { awk '{$1=$1; print}'; }
 
+# Compare decimal strings exactly, including Linux's 9223372036854775807 default.
+file_max_at_least() {
+    [[ "$1" =~ ^[0-9]+$ && "$2" =~ ^[0-9]+$ ]] || return 1
+    LC_ALL=C awk -v actual="$1" -v target="$2" 'BEGIN {
+        sub(/^0+/, "", actual); sub(/^0+/, "", target)
+        exit !(length(actual) > length(target) ||
+            (length(actual) == length(target) && "x" actual >= "x" target))
+    }'
+}
+
 apply_and_verify() {
     section "应用并验证"
     step 1 2 "正在加载 sysctl 配置..."
@@ -408,7 +429,11 @@ apply_and_verify() {
     step 2 2 "正在逐项读回生成的配置..."
     while IFS='=' read -r key target; do
         if ! actual=$(sysctl -n "$key" 2>/dev/null) ||
-           [[ $(normalize_value <<< "$actual") != "$(normalize_value <<< "$target")" ]]; then
+           ! { if [[ "$key" = fs.file-max ]]; then
+                   file_max_at_least "$actual" "$target"
+               else
+                   [[ $(normalize_value <<< "$actual") = "$(normalize_value <<< "$target")" ]]
+               fi; }; then
             warning "参数未达到目标：$key（目标：$target；实际：${actual:-无法读取}）"
             [[ "$rc" -ne 0 ]] || rc=1
         fi

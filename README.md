@@ -32,6 +32,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/network-optimizatio
 - Swap 替换失败时恢复旧文件、启动配置和活动状态；恢复失败会报告并保留恢复文件。
 - 配置文件：`/etc/sysctl.d/99-network-optimization.conf`，保留最近 3 份唯一命名的备份。
 - 新配置准备完成后迁移 `99-bbr.conf`，旧文件保存为 `.migrated_` 备份。
+- `fs.file-max` 生成时保留现有更高运行上限，应用后验证不低于生成目标；其他参数仍须与目标一致。
 - 应用后逐项验证实际参数；失败恢复原配置及目标参数的原运行值，不撤销已完成的 Swap 操作。
 - `uninstall` 删除本脚本配置并重新加载剩余配置，**不恢复内核默认值**。
 - `restore` 恢复最近一次配置备份；两者均不撤销 Swap 或旧配置迁移。
