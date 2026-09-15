@@ -34,7 +34,8 @@ step() { printf '  ▸ %s/%s %s\n' "$1" "$2" "$3"; }
 
 # --- 配置文件路径 ---
 CONF_FILE="/etc/sysctl.d/99-network-optimization.conf"
-LEGACY_CONF_FILE="/etc/sysctl.d/99-bbr.conf"
+SYSCTL_DIRS=(/etc/sysctl.d /run/sysctl.d /usr/local/lib/sysctl.d /usr/lib/sysctl.d /lib/sysctl.d)
+SYSCTL_MAIN="/etc/sysctl.conf"
 SWAP_FILE="/swapfile"
 
 # --- 系统信息检测函数 ---
@@ -153,13 +154,74 @@ manage_backups() {
     fi
 }
 
-migrate_legacy_config() {
-    if [[ -f "$LEGACY_CONF_FILE" ]]; then
-        LEGACY_BACKUP=$(mktemp "${LEGACY_CONF_FILE}.migrated_XXXXXX") || return 1
-        cp -p -- "$LEGACY_CONF_FILE" "$LEGACY_BACKUP" || return 1
-        rm -f -- "$LEGACY_CONF_FILE" || return 1
-        warning "已停用旧配置：${LEGACY_CONF_FILE}；备份：${LEGACY_BACKUP}"
-    fi
+# Rewrite exact assignments only. procps swaps dots/slashes when dot comes first.
+# Preserve all unmatched assignments, including globs, without expanding them.
+neutralize_sysctl() {
+    awk -v targets="$targets" '
+    function canonical(k, first) {
+        first=match(k, /[.\/]/)
+        if (first && substr(k,first,1)==".") {
+            gsub(/\//, "@", k); gsub(/\./, "/", k); gsub(/@/, ".", k)
+        }
+        return k
+    }
+    BEGIN {
+        n=split(targets, a, "\n")
+        for (i=1;i<=n;i++) { split(a[i], b, "="); managed[canonical(b[1])]=1 }
+    }
+    {
+        line=$0; key=line
+        sub(/^[[:space:]]+/, "", key)
+        if (key !~ /^[#;]/ && index(key,"=")) {
+            sub(/=.*/, "", key); sub(/[[:space:]]+$/, "", key)
+            sub(/^-/, "", key)
+            if (canonical(key) in managed) { line="# network-optimization disabled: " line; changed=1 }
+        }
+        print line
+    }
+    END { if (!changed) exit 3 }' "$1"
+}
+
+# Stage all *.conf inputs before touching originals, regardless of basename.
+# Real paths deduplicate aliases (including sysctl.conf).
+stage_sysctl_takeover() {
+    local dir file real output backup
+    local -a candidates=()
+    local -A seen=()
+    for dir in "${SYSCTL_DIRS[@]}"; do
+        [[ -d "$dir" ]] || continue
+        [[ -r "$dir" && -x "$dir" ]] || return 1
+        for file in "$dir"/*.conf; do
+            [[ -e "$file" || -L "$file" ]] || continue
+            candidates+=("$file")
+        done
+    done
+    if [[ -e "$SYSCTL_MAIN" || -L "$SYSCTL_MAIN" ]]; then candidates+=("$SYSCTL_MAIN"); fi
+    for file in "${candidates[@]}"; do
+        real=$(realpath -e -- "$file") || return 1
+        [[ "$real" = /dev/null || "$real" = "$config_real" ]] && continue
+        [[ ${seen[$real]+yes} ]] && continue
+        seen[$real]=1
+        [[ -f "$real" && -r "$real" ]] || return 1
+        output=$(mktemp "${real}.network-stage.XXXXXX") || return 1
+        takeover_staged+=("$output")
+        local parse_rc=0
+        neutralize_sysctl "$real" > "$output" || parse_rc=$?
+        [[ "$parse_rc" -eq 3 ]] && continue
+        if [[ "$parse_rc" -ne 0 ]]; then
+            error "无法解析配置：$file；未接管参数。"
+            return 1
+        fi
+        # awk prints a final newline; retain an original unterminated last line.
+        local last_byte
+        last_byte=$(tail -c 1 -- "$real") || return 1
+        if [[ -n "$last_byte" ]]; then truncate -s -1 -- "$output" || return 1; fi
+        backup=$(mktemp "${real}.network-backup.XXXXXX") || return 1
+        takeover_backups+=("$backup")
+        cp -p -- "$real" "$backup" || return 1
+        takeover_files+=("$real")
+        takeover_outputs+=("$output")
+    done
 }
 
 configure_swap() {
@@ -451,7 +513,10 @@ apply_and_verify() {
 configure_network() {
     local staged previous="" snapshot key target actual targets rc=0 installed=false
     local config_restore_failed=false
-    local LEGACY_BACKUP=""
+    local config_real i touched=0
+    local -a takeover_files=() takeover_outputs=() takeover_backups=() takeover_staged=()
+    config_real=$(realpath -m -- "$CONF_FILE") || return 1
+    if [[ -e "$config_real" && ! -f "$config_real" ]]; then return 1; fi
     staged=$(mktemp "${CONF_FILE}.tmp.XXXXXX") || return 1
     CONF_WRITE_FILE="$staged"
     if ! apply_optimizations; then
@@ -475,31 +540,48 @@ configure_network() {
         if [[ "$rc" -eq 0 ]] && ! cp -p -- "$CONF_FILE" "$previous"; then rc=1; fi
     fi
     if [[ "$rc" -eq 0 ]] && ! manage_backups; then rc=1; fi
+    if [[ "$rc" -eq 0 ]] && ! stage_sysctl_takeover; then rc=1; fi
     if [[ "$rc" -ne 0 ]]; then
-        rm -f -- "$staged" "$snapshot"
+        rm -f -- "$staged" "$snapshot" "${takeover_staged[@]}" "${takeover_backups[@]}"
         [[ -z "$previous" ]] || rm -f -- "$previous"
         return 1
     fi
-    if mv -f -- "$staged" "$CONF_FILE"; then installed=true; else rc=1; fi
-    if [[ "$rc" -eq 0 ]] && ! migrate_legacy_config; then rc=1; fi
+    # Write through resolved targets: retain symlinks, inode permissions and owners.
+    installed=true
+    if [[ -e "$config_real" ]]; then
+        if ! cat -- "$staged" > "$config_real" || ! cmp -s -- "$staged" "$config_real"; then rc=1; fi
+    else
+        mv -f -- "$staged" "$config_real" || rc=1
+    fi
+    if [[ "$rc" -eq 0 ]]; then
+        for ((i=0; i<${#takeover_files[@]}; i++)); do
+            touched=$((i + 1))
+            if ! cat -- "${takeover_outputs[i]}" > "${takeover_files[i]}" ||
+               ! cmp -s -- "${takeover_outputs[i]}" "${takeover_files[i]}"; then rc=1; break; fi
+        done
+    fi
     if [[ "$rc" -eq 0 ]]; then apply_and_verify || rc=$?; fi
     if [[ "$rc" -ne 0 ]]; then
         if [[ "$installed" = true ]]; then
             if [[ -n "$previous" ]]; then
-                if ! cp -p -- "$previous" "$CONF_FILE"; then
+                if ! cp -p -- "$previous" "$config_real" || ! cmp -s -- "$previous" "$config_real"; then
                     config_restore_failed=true
                     error "配置恢复失败，保留：$previous"
                 fi
             else
-                if ! rm -f -- "$CONF_FILE"; then
+                if ! rm -f -- "$config_real"; then
                     config_restore_failed=true
                     error "无法撤销新配置"
                 fi
             fi
         fi
-        if [[ -n "$LEGACY_BACKUP" && ! -e "$LEGACY_CONF_FILE" ]]; then
-            cp -p -- "$LEGACY_BACKUP" "$LEGACY_CONF_FILE" || warning "旧配置恢复失败，保留：$LEGACY_BACKUP"
-        fi
+        for ((i=0; i<touched; i++)); do
+            if ! cp -p -- "${takeover_backups[i]}" "${takeover_files[i]}" ||
+               ! cmp -s -- "${takeover_backups[i]}" "${takeover_files[i]}"; then
+                config_restore_failed=true
+                error "配置恢复失败，保留：${takeover_backups[i]}"
+            fi
+        done
         local restore_failed=false
         while IFS='=' read -r key target; do
             actual=$(sysctl -n "$key" 2>/dev/null) || actual=""
@@ -512,12 +594,22 @@ configure_network() {
                 fi
             fi
         done < "$snapshot"
-        if [[ "$restore_failed" = true ]]; then warning "保留运行值快照：$snapshot"; else rm -f -- "$snapshot"; fi
-        error "应用失败，已尝试恢复本脚本配置及目标运行值；不是全系统回滚，Swap 不受此恢复影响。"
+        if [[ "$restore_failed" = true ]]; then
+            config_restore_failed=true
+            warning "保留运行值快照及配置备份：$snapshot"
+        else
+            rm -f -- "$snapshot"
+        fi
+        error "应用失败，已尝试恢复本次修改的配置及目标运行值；不是全系统回滚，Swap 不受此恢复影响。"
     else
         rm -f -- "$snapshot" || return 1
     fi
-    rm -f -- "$staged"
+    rm -f -- "$staged" "${takeover_staged[@]}" || return 1
+    if [[ "$rc" -eq 0 ]]; then
+        for i in "${takeover_backups[@]}"; do warning "同名参数已停用，原文件备份：$i"; done
+    elif [[ "$config_restore_failed" = false ]]; then
+        rm -f -- "${takeover_backups[@]}" || return 1
+    fi
     if [[ -n "$previous" && "$config_restore_failed" = false ]]; then rm -f -- "$previous"; fi
     return "$rc"
 }
@@ -535,7 +627,7 @@ VPS 网络优化 ${SCRIPT_VERSION}
   $0 restore     恢复最近一次本脚本配置备份并重新加载
   $0 --help      显示帮助（无需 root）
 
-restore/uninstall 需要 root；不撤销 Swap 或旧配置迁移。
+restore/uninstall 需要 root；不撤销 Swap 或其他配置中的同名参数接管。
 默认执行不另行确认；Swap 容量不一致时停用全部现有 Swap（含分区）并替换为 /swapfile。
 EOF
 }

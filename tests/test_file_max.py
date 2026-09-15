@@ -9,7 +9,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 NAMES = (
     "calculate_parameters", "add_conf", "apply_optimizations", "config_targets",
     "normalize_value", "file_max_at_least", "apply_and_verify", "manage_backups",
-    "migrate_legacy_config", "configure_network",
+    "neutralize_sysctl", "stage_sysctl_takeover", "configure_network",
 )
 SOURCE = (ROOT / "script.sh").read_text()
 def extract(name):
@@ -25,6 +25,8 @@ set -Eeuo pipefail
 CONF_FILE="$PWD/network.conf"
 CONF_WRITE_FILE="$PWD/staged.conf"
 LEGACY_CONF_FILE="$PWD/legacy.conf"
+SYSCTL_DIRS=("$PWD/etc" "$PWD/run" "$PWD/local" "$PWD/usr" "$PWD/lib")
+SYSCTL_MAIN="$PWD/sysctl.conf"
 TOTAL_MEM=1024 CPU_CORES=1 BBR_AVAILABLE=false
 section() { :; }
 step() { :; }
