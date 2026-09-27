@@ -38,7 +38,8 @@ sysctl_supported() { [[ "$1" = fs.file-max || "$1" = vm.swappiness ]]; }
 sysctl() {
     printf '%s\n' "$*" >> "$PWD/calls"
     case "$1" in
-        --system)
+        -p)
+            [[ "$2" = "$CONF_FILE" ]] || return 99
             touch "$PWD/loaded"
             while IFS='=' read -r key value; do
                 printf '%s\n' "$value" > "$PWD/$key"

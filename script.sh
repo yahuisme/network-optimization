@@ -3,11 +3,11 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: v26.09.11
+# 版本: v26.09.27
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="v26.09.15"
+SCRIPT_VERSION="v26.09.27"
 
 set -Eeuo pipefail
 
@@ -224,6 +224,23 @@ stage_sysctl_takeover() {
     done
 }
 
+ensure_swap_fstab_entry() {
+    local status=0
+    awk -v path="$SWAP_FILE" '
+        $1 == path { found++; if ($3 != "swap" || NF < 4 || $4 ~ /(^|,)noauto(,|$)/) invalid=1 }
+        END { if (invalid || found > 1) exit 2; if (!found) exit 3 }
+    ' /etc/fstab || status=$?
+    case "$status" in
+        0) return 0 ;;
+        3)
+            local last_byte
+            last_byte=$(tail -c 1 -- /etc/fstab) || return 1
+            { if [[ -n "$last_byte" ]]; then printf '\n' || return 1; fi
+              printf '%s\n' "$SWAP_FILE none swap sw 0 0"; } >> /etc/fstab ;;
+        *) error "Swap 启动条目冲突或无法读取 /etc/fstab，未修改。"; return 1 ;;
+    esac
+}
+
 configure_swap() {
     local swap_mb
     if [ "$TOTAL_MEM" -le 512 ]; then
@@ -236,14 +253,18 @@ configure_swap() {
 
     # 计算当前总 Swap（含分区与 swapfile）
     local current_total_mb=0 size_bytes swap_line swap_sizes
-    swap_sizes=$(swapon --show=NAME,SIZE --bytes --noheadings) || return 1
+    swap_sizes=$(swapon --show=NAME,SIZE --bytes --noheadings --raw) || return 1
     while IFS= read -r swap_line; do
         [[ -n "$swap_line" ]] || continue
-        size_bytes=$(awk '{print $2}' <<< "$swap_line")
-        [[ "$size_bytes" =~ ^[0-9]+$ ]] && current_total_mb=$((current_total_mb + (size_bytes + 524288) / 1048576))
+        size_bytes=${swap_line##* }
+        [[ "$size_bytes" =~ ^[0-9]+$ ]] || { error "无法读取有效的 Swap 容量，未修改。"; return 1; }
+        current_total_mb=$((current_total_mb + (size_bytes + 524288) / 1048576))
     done <<< "$swap_sizes"
 
     if [[ "$current_total_mb" -eq "$swap_mb" ]]; then
+        local active_names
+        active_names=$(swapon --show=NAME --noheadings --raw) || return 1
+        if grep -Fxq "$SWAP_FILE" <<< "$active_names"; then ensure_swap_fstab_entry || return 1; fi
         success "现有 Swap 与目标一致（${current_total_mb}MB），保留。"
         return
     fi
@@ -262,6 +283,11 @@ configure_swap() {
 
     section "创建 Swap"
     step 1 2 "正在准备 ${swap_mb}MB Swap..."
+    # Refuse symlinks, including dangling ones, before creating replacement files.
+    if [[ -L "$SWAP_FILE" ]]; then
+        error "拒绝替换符号链接：$SWAP_FILE"
+        return 1
+    fi
     # 保护：/swapfile 存在但未启用时视为用户文件，不覆盖
     if [[ -e "$SWAP_FILE" ]] && ! swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$SWAP_FILE"; then
         warning "${SWAP_FILE} 已存在但未启用，为避免覆盖用户文件，跳过创建。"
@@ -322,7 +348,11 @@ configure_swap() {
     if [[ "$failed" -eq 0 ]] && ! swapon "$SWAP_FILE"; then failed=1; fi
     if [[ "$failed" -eq 0 ]]; then
         if ! sed -E '\|^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+[^[:space:]]+[[:space:]]+swap([[:space:]]\|$)|d' "$fstab_copy" > /etc/fstab ||
-           ! printf '%s\n' "$SWAP_FILE none swap sw 0 0" >> /etc/fstab; then failed=1; fi
+           ! ensure_swap_fstab_entry; then failed=1; fi
+    fi
+    if [[ "$failed" -eq 0 ]]; then
+        local final_swap
+        if ! final_swap=$(swapon --show=NAME --noheadings --raw) || [[ "$final_swap" != "$SWAP_FILE" ]]; then failed=1; fi
     fi
     if [[ "$failed" -ne 0 ]]; then
         # Never unlink a file that may still be active; recover independent items.
@@ -487,7 +517,7 @@ apply_and_verify() {
         error "配置目标解析失败或为空，未加载 sysctl 配置。"
         return 1
     fi
-    sysctl --system >/dev/null 2>&1 || rc=$?
+    sysctl -p "$CONF_FILE" >/dev/null 2>&1 || rc=$?
     step 2 2 "正在逐项读回生成的配置..."
     while IFS='=' read -r key target; do
         if ! actual=$(sysctl -n "$key" 2>/dev/null) ||
@@ -623,8 +653,8 @@ VPS 网络优化 ${SCRIPT_VERSION}
 
 用法：
   $0             应用网络优化并按内存调整 Swap（需要 root）
-  $0 uninstall   删除本脚本配置并重新加载；不恢复内核默认值
-  $0 restore     恢复最近一次本脚本配置备份并重新加载
+  $0 uninstall   仅删除本脚本配置，保持当前运行参数
+  $0 restore     恢复最近一次本脚本配置备份并加载验证
   $0 --help      显示帮助（无需 root）
 
 restore/uninstall 需要 root；不撤销 Swap 或其他配置中的同名参数接管。
@@ -661,9 +691,9 @@ main() {
                     error "备份恢复失败：$backup"
                     exit 1
                 fi
-                step 2 2 "正在重新加载 sysctl..."
-                if sysctl --system >/dev/null 2>&1; then
-                    success "已恢复配置文件并重新加载系统参数：$backup"
+                step 2 2 "正在加载并验证恢复的配置..."
+                if apply_and_verify; then
+                    success "已恢复并验证配置：$backup"
                 else
                     error "配置文件已恢复，但系统参数重新加载失败。"
                     exit 1
@@ -674,16 +704,10 @@ main() {
                 exit 1
             fi
             section "卸载网络优化"
-            warning "将删除优化配置并重新加载；不会恢复内核默认值或撤销 Swap。"
-            step 1 2 "正在删除：$CONF_FILE"
+            warning "仅删除优化配置；当前运行参数保持不变，不撤销 Swap 或参数接管。"
+            step 1 1 "正在删除：$CONF_FILE"
             rm -f "$CONF_FILE"
-            step 2 2 "正在重新加载 sysctl..."
-            if sysctl --system >/dev/null 2>&1; then
-                success "网络优化配置已删除并重新加载系统参数。"
-            else
-                error "网络优化配置已删除，但系统参数重新加载失败。"
-                exit 1
-            fi
+            success "网络优化配置已删除；当前运行参数保持不变。"
             exit 0
             ;;
         "")
