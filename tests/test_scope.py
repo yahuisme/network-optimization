@@ -20,6 +20,26 @@ configure_network
 [[ $(cat net.ipv4.tcp_rmem) = "8192 262144 $TCP_MEM_MAX" ]]
 ''')
 
+    def test_parser_and_root_guards_do_not_mutate(self):
+        for args, expected in (
+            ('--help', 0), ('-h', 0), ('--help extra', 2),
+            ('unknown', 2), ("''", 2), ('restore', 1), ('uninstall', 1), ('', 1),
+        ):
+            with self.subTest(args=args):
+                self.run_shell(test_file_max.extract('usage') + '\n' +
+                               test_file_max.extract('require_root') + '\n' +
+                               test_file_max.extract('pre_flight_checks') + '\n' +
+                               test_file_max.extract('main') + r'''
+BOLD='' NC='' SCRIPT_VERSION=test
+id() { printf '1000\n'; }
+modprobe() { touch mutated; }
+configure_swap() { touch mutated; }
+configure_network() { touch mutated; }
+''' + f'''
+if (main {args}); then rc=0; else rc=$?; fi
+[[ $rc = {expected} && ! -e mutated ]]
+''')
+
     def test_uninstall_leaves_runtime_untouched(self):
         self.run_shell(test_file_max.extract('usage') + '\n' + test_file_max.extract('main') + r'''
 BOLD='' NC='' SCRIPT_VERSION=test

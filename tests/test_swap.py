@@ -67,6 +67,17 @@ grep -Fx 'UUID=example / ext4 defaults 0 1' fstab
 [[ $(grep -Fxc "$SWAP_FILE none swap sw 0 0" fstab) = 1 ]]
 ''')
 
+    def test_replacement_removes_old_swap_boot_entries(self):
+        self.run_shell(r'''
+printf '/dev/mock-partition\n' > active
+SIZE_BYTES=536866816
+printf '# keep\n/dev/mock-partition none swap sw 0 0\nUUID=old none swap defaults 0 0\nUUID=root / ext4 defaults 0 1\n' > fstab
+configure_swap
+[[ $(grep -cE '^(/dev/mock-partition|UUID=old) ' fstab) = 0 ]]
+grep -Fx 'UUID=root / ext4 defaults 0 1' fstab
+[[ $(grep -Fxc "$SWAP_FILE none swap sw 0 0" fstab) = 1 ]]
+''')
+
     def test_successful_swap_replacement(self):
         self.run_shell(r'''
 printf 'old swap\n' > "$SWAP_FILE"
@@ -135,6 +146,57 @@ if configure_swap; then exit 80; fi
 cmp fstab expected
 ''')
 
+    def test_recovery_blocked_new_swap_still_restores_fstab_and_partition(self):
+        for failure in ('query', 'swapoff'):
+            with self.subTest(failure=failure):
+                self.run_shell('FAILURE=' + failure + r'''
+printf 'old swap\n' > "$SWAP_FILE"
+printf '%s\n/dev/mock\n' "$SWAP_FILE" > active
+SIZE_BYTES=268431360
+cp fstab expected
+swapon() {
+    case "$1" in
+        --show=NAME,SIZE)
+            while IFS= read -r name; do printf '%s %s\n' "$name" "$SIZE_BYTES"; done < active ;;
+        --show=NAME)
+            if [[ -e installed ]]; then
+                [[ "$FAILURE" != query ]] || return 1
+                printf '%s\n/dev/unexpected\n' "$SWAP_FILE"
+            else cat active; fi ;;
+        *) [[ "$1" != "$SWAP_FILE" ]] || touch installed
+            printf '%s\n' "$1" >> active ;;
+    esac
+}
+swapoff() {
+    if [[ -e installed && "$1" = "$SWAP_FILE" ]]; then return 1; fi
+    grep -Fxv "$1" active > active.new || :; mv active.new active
+}
+if configure_swap; then exit 80; fi
+cmp fstab expected
+[[ $(cat "$SWAP_FILE") = 'new swap' ]]
+[[ -n $(compgen -G "$SWAP_FILE.old.*") ]]
+[[ -n $(compgen -G "$PWD/fstab.network.*") ]]
+grep -Fx /dev/mock active
+''')
+
+    def test_preparation_failures_leave_old_files_and_state(self):
+        for fault in (
+            'mkswap() { return 1; }',
+            'fallocate() { return 1; }',
+            'swapoff() { return 1; }',
+        ):
+            with self.subTest(fault=fault):
+                self.run_shell(fault + r'''
+printf 'old swap\n' > "$SWAP_FILE"
+printf '%s\n' "$SWAP_FILE" > active
+SIZE_BYTES=536866816
+cp fstab expected
+if configure_swap; then exit 80; fi
+cmp fstab expected
+[[ $(cat "$SWAP_FILE") = 'old swap' && $(cat active) = "$SWAP_FILE" ]]
+[[ -z $(compgen -G "$SWAP_FILE.new.*") ]]
+''')
+
     def test_invalid_size_fails_before_changes(self):
         self.run_shell(r'''
 printf '/dev/mock\n' > active
@@ -172,6 +234,19 @@ printf '%s\n' "$SWAP_FILE" > active
 configure_swap
 configure_swap
 [[ $(grep -Fxc "$SWAP_FILE none swap sw 0 0" fstab) = 1 ]]
+''')
+
+    def test_matching_partition_preserves_inactive_user_file_or_symlink(self):
+        for prepare in (
+            'printf user-data > "$SWAP_FILE"',
+            'printf user-data > user-file; ln -s "$PWD/user-file" "$SWAP_FILE"',
+        ):
+            with self.subTest(prepare=prepare):
+                self.run_shell(prepare + r'''
+printf '/dev/mock\n' > active
+configure_swap
+[[ $(cat "$SWAP_FILE") = user-data && $(cat fstab) = '# original fstab' ]]
+[[ $(cat active) = /dev/mock ]]
 ''')
 
     def test_matching_partition_does_not_add_owned_entry(self):

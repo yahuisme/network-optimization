@@ -3,11 +3,11 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: v26.09.27
+# 版本: v26.10.28
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="v26.09.27"
+SCRIPT_VERSION="v26.10.28"
 
 set -Eeuo pipefail
 
@@ -203,7 +203,9 @@ stage_sysctl_takeover() {
         [[ ${seen[$real]+yes} ]] && continue
         seen[$real]=1
         [[ -f "$real" && -r "$real" ]] || return 1
-        output=$(mktemp "${real}.network-stage.XXXXXX") || return 1
+        # Unrelated vendor files may live on a read-only mount. Stage in our
+        # writable config directory; only changed originals need adjacent backups.
+        output=$(mktemp "$(dirname "$CONF_FILE")/$(basename "$real").network-stage.XXXXXX") || return 1
         takeover_staged+=("$output")
         local parse_rc=0
         neutralize_sysctl "$real" > "$output" || parse_rc=$?
@@ -541,6 +543,8 @@ apply_and_verify() {
 }
 
 configure_network() {
+    # restore shares the same file/runtime transaction, without takeover/rotation.
+    local restore_source="${1:-}"
     local staged previous="" snapshot key target actual targets rc=0 installed=false
     local config_restore_failed=false
     local config_real i touched=0
@@ -549,7 +553,11 @@ configure_network() {
     if [[ -e "$config_real" && ! -f "$config_real" ]]; then return 1; fi
     staged=$(mktemp "${CONF_FILE}.tmp.XXXXXX") || return 1
     CONF_WRITE_FILE="$staged"
-    if ! apply_optimizations; then
+    if ! { if [[ -n "$restore_source" ]]; then
+               cp -- "$restore_source" "$staged"
+           else
+               apply_optimizations
+           fi; }; then
         CONF_WRITE_FILE=""
         rm -f -- "$staged"
         error "配置生成失败，原配置未停用。"
@@ -569,8 +577,10 @@ configure_network() {
         previous=$(mktemp "${CONF_FILE}.previous.XXXXXX") || rc=1
         if [[ "$rc" -eq 0 ]] && ! cp -p -- "$CONF_FILE" "$previous"; then rc=1; fi
     fi
-    if [[ "$rc" -eq 0 ]] && ! manage_backups; then rc=1; fi
-    if [[ "$rc" -eq 0 ]] && ! stage_sysctl_takeover; then rc=1; fi
+    if [[ -z "$restore_source" ]]; then
+        if [[ "$rc" -eq 0 ]] && ! manage_backups; then rc=1; fi
+        if [[ "$rc" -eq 0 ]] && ! stage_sysctl_takeover; then rc=1; fi
+    fi
     if [[ "$rc" -ne 0 ]]; then
         rm -f -- "$staged" "$snapshot" "${takeover_staged[@]}" "${takeover_backups[@]}"
         [[ -z "$previous" ]] || rm -f -- "$previous"
@@ -687,15 +697,11 @@ main() {
             if [[ "$1" == "restore" && -n "$backup" ]]; then
                 section "恢复备份"
                 step 1 2 "正在恢复：$backup"
-                if ! cp "$backup" "$CONF_FILE"; then
-                    error "备份恢复失败：$backup"
-                    exit 1
-                fi
                 step 2 2 "正在加载并验证恢复的配置..."
-                if apply_and_verify; then
+                if configure_network "$backup"; then
                     success "已恢复并验证配置：$backup"
                 else
-                    error "配置文件已恢复，但系统参数重新加载失败。"
+                    error "备份恢复失败；已尝试保留或恢复原配置及目标运行值。"
                     exit 1
                 fi
                 exit 0

@@ -38,6 +38,33 @@ for file in "$PWD/etc/masked.conf" "$PWD/usr/masked.conf" "$PWD/local/local.conf
 done
 ''')
 
+    def test_readonly_unrelated_directory_needs_no_write_access(self):
+        self.run_shell(r'''
+mkdir "$PWD/usr"
+printf 'net.ipv4.ip_forward=1\n' > "$PWD/usr/vendor.conf"
+cp "$PWD/usr/vendor.conf" expected
+# Model a read-only vendor mount without remounting or changing host permissions.
+mktemp() {
+    if [[ "$1" = "$PWD/usr/"* ]]; then return 1; fi
+    command mktemp "$@"
+}
+configure_network
+cmp expected "$PWD/usr/vendor.conf"
+''')
+
+    def test_unchanged_rerun_keeps_single_external_backup(self):
+        self.run_shell(r'''
+mkdir "$PWD/etc"
+printf 'vm.swappiness=10\nkeep.this=1\n' > "$PWD/etc/duplicate.conf"
+configure_network
+cp "$PWD/etc/duplicate.conf" expected
+configure_network
+cmp expected "$PWD/etc/duplicate.conf"
+backups=("$PWD/etc/duplicate.conf".network-backup.*)
+[[ ${#backups[@]} = 1 ]]
+[[ $(grep -c '^vm.swappiness' "$CONF_FILE") = 1 ]]
+''')
+
     def test_no_conflict_is_byte_identical(self):
         self.run_shell(r'''
 mkdir "$PWD/etc"
@@ -68,6 +95,26 @@ backups=("$PWD/etc/a.conf".network-backup.*)
 cmp original.expected "${backups[0]}"
 [[ -z $(compgen -G "$PWD/etc/z.conf.network-backup.*") ]]
 [[ -e "$CONF_FILE" && -e loaded ]]
+''')
+
+    def test_masked_or_missing_config_directory_fails_before_mutation(self):
+        for prepare in (
+            'ln -s /dev/null "$CONF_FILE"',
+            'CONF_FILE="$PWD/missing/network.conf"',
+        ):
+            with self.subTest(prepare=prepare):
+                self.run_shell(prepare + r'''
+if configure_network; then exit 80; fi
+[[ ! -e loaded && $(cat vm.swappiness) = 60 ]]
+''')
+
+    def test_crlf_and_unterminated_unrelated_bytes_survive(self):
+        self.run_shell(r'''
+mkdir "$PWD/etc"
+printf 'vm.swappiness=99\r\n# comment\r\nkeep.this=1' > "$PWD/etc/crlf.conf"
+printf '# network-optimization disabled: vm.swappiness=99\r\n# comment\r\nkeep.this=1' > expected
+configure_network
+cmp expected "$PWD/etc/crlf.conf"
 ''')
 
     def test_equal_values_and_unterminated_last_line(self):
