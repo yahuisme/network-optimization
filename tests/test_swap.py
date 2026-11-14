@@ -9,12 +9,12 @@ SOURCE = (pathlib.Path(__file__).resolve().parents[1] / 'script.sh').read_text()
 
 
 def functions():
-    names = ['configure_swap', 'ensure_swap_fstab_entry', 'valid_swap_file']
+    names = ['configure_swap', 'ensure_swap_fstab_entry']
     blocks = []
     for name in names:
         match = re.search(r'^' + name + r'\(\) \{\n.*?^\}', SOURCE, re.M | re.S)
-        if match:
-            blocks.append(match.group(0))
+        assert match is not None, name
+        blocks.append(match.group(0))
     # Only absolute system paths, never a backup-relative name.
     return re.sub(r'(?<![\w$}])(/etc/fstab)', '$PWD/fstab', '\n'.join(blocks))
 
@@ -30,6 +30,11 @@ success() { printf 'SUCCESS %s\n' "$*"; }
 printf '# original fstab\n' > fstab
 : > active
 swapon() {
+    if [[ "$1" = --show=NAME,PRIO ]]; then
+        while IFS= read -r name; do printf '%s 0\n' "$name"; done < active
+        return
+    fi
+    while [[ "$1" = -p || "$1" = -o ]]; do shift 2; done
     case "$1" in
         --show=NAME,SIZE)
             while IFS= read -r name; do printf '%s %s\n' "$name" "${SIZE_BYTES:-1073737728}"; done < active ;;
@@ -38,7 +43,6 @@ swapon() {
     esac
 }
 swapoff() { grep -Fxv "$1" active > active.new || :; mv active.new active; }
-blkid() { [[ ${SIGNATURE:-swap} = swap ]] && printf 'swap\n'; }
 df() { printf 'Filesystem 1048576-blocks Used Available Capacity Mounted\nmock 10000 100 9900 1%% /\n'; }
 fallocate() { printf 'new swap\n' > "${@: -1}"; }
 dd() { return 99; }
@@ -55,6 +59,123 @@ class SwapTests(unittest.TestCase):
                                     capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
+
+    def test_matching_fstab_real_short_write_preserves_bytes_and_mode(self):
+        self.run_shell(r'''
+printf 'swap\n' > "$SWAP_FILE"
+printf '%s\n' "$SWAP_FILE" > active
+printf '#%0999d\n' 0 > fstab
+chmod 640 fstab
+cp -p fstab expected
+(
+    trap '' XFSZ
+    ulimit -f 1
+    if configure_swap; then exit 80; else exit 0; fi
+)
+cmp fstab expected
+[[ $(stat -c %a fstab) = 640 && $(cat active) = "$SWAP_FILE" ]]
+! compgen -G "$PWD/fstab.network.*"
+''')
+
+    def test_partial_swapoff_restores_actual_priority_and_fstab_discard(self):
+        self.run_shell(r'''
+printf '/dev/mock1\n/dev/mock2\n' > active
+printf '/dev/mock1 100\n/dev/mock2 200\n' > priorities
+SIZE_BYTES=268431360
+printf '/dev/mock1 none swap pri=7,discard=pages,noauto 0 0\n/dev/inactive none swap pri=88 0 0\n' > fstab
+cp fstab expected
+swapon() {
+    case "$1" in
+        --show=NAME,SIZE) while read -r name; do printf '%s %s\n' "$name" "$SIZE_BYTES"; done < active ;;
+        --show=NAME,PRIO) cat priorities ;;
+        --show=NAME) cat active ;;
+        *)
+            [[ "$*" != *-a* && "$*" != *--all* ]] || return 99
+            local name=${@: -1} options='' priority=-1
+            while (( $# > 1 )); do
+                case "$1" in -p) priority=$2; shift 2 ;; -o) options=$2; shift 2 ;; *) return 98 ;; esac
+            done
+            printf '%s %s %s\n' "$name" "$priority" "$options" >> recovered
+            printf '%s\n' "$name" >> active ;;
+    esac
+}
+swapoff() {
+    [[ "$1" != /dev/mock2 ]] || return 4
+    grep -Fxv "$1" active > active.new || :
+    command mv active.new active
+}
+if configure_swap; then exit 80; fi
+cmp fstab expected
+[[ $(sort active) = $'/dev/mock1\n/dev/mock2' ]]
+grep -Fx '/dev/mock1 100 discard=pages' recovered
+[[ $(wc -l < recovered) = 1 ]]
+''')
+
+    def test_automatic_negative_priorities_survive_partial_swapoff(self):
+        self.run_shell(r'''
+printf '/dev/mock1\n/dev/mock2\n/dev/mock3\n' > active
+printf '/dev/mock1 -2\n/dev/mock2 -3\n/dev/mock3 -4\n' > priorities
+cp priorities priorities.expected
+SIZE_BYTES=134213632
+swapon() {
+    case "$1" in
+        --show=NAME,SIZE) while read -r name; do printf '%s %s\n' "$name" "$SIZE_BYTES"; done < active ;;
+        --show=NAME,PRIO) cat priorities ;;
+        --show=NAME) cat active ;;
+        *)
+            local name=${@: -1} priority=-1
+            while (( $# > 1 )); do
+                case "$1" in
+                    -p) [[ "$2" -ge 0 ]] || return 97; priority=$2; shift 2 ;;
+                    -o) shift 2 ;;
+                    *) return 98 ;;
+                esac
+            done
+            # Linux assigns automatic negatives below the least active priority.
+            if (( priority < 0 )); then
+                priority=$(awk 'BEGIN { p=-1 } $2 < p { p=$2 } END { print p-1 }' priorities)
+            fi
+            printf '%s %s\n' "$name" "$priority" >> priorities
+            printf '%s\n' "$name" >> active ;;
+    esac
+}
+swapoff() {
+    [[ "$1" != /dev/mock2 ]] || return 4
+    local priority
+    priority=$(awk -v name="$1" '$1 == name { print $2 }' priorities)
+    # Linux compacts lower automatic priorities after removing a negative one.
+    awk -v name="$1" -v p="$priority" '$1 != name { if (p < 0 && $2 < p) $2++; print }' priorities > priorities.new
+    command mv priorities.new priorities
+    grep -Fxv "$1" active > active.new || :
+    command mv active.new active
+}
+if configure_swap; then exit 80; fi
+[[ $(sort priorities) = "$(sort priorities.expected)" ]]
+[[ $(sort active) = $'/dev/mock1\n/dev/mock2\n/dev/mock3' ]]
+''')
+
+    def test_rollback_priority_mismatch_retains_recovery_evidence(self):
+        self.run_shell(r'''
+printf '/dev/mock1\n/dev/mock2\n' > active
+SIZE_BYTES=268431360
+swapon() {
+    case "$1" in
+        --show=NAME,SIZE) while read -r name; do printf '%s %s\n' "$name" "$SIZE_BYTES"; done < active ;;
+        --show=NAME,PRIO)
+            if [[ -e recovered ]]; then printf '/dev/mock1 -2\n/dev/mock2 200\n';
+            else printf '/dev/mock1 100\n/dev/mock2 200\n'; fi ;;
+        --show=NAME) cat active ;;
+        *) touch recovered; printf '%s\n' "${@: -1}" >> active ;;
+    esac
+}
+swapoff() {
+    [[ "$1" != /dev/mock2 ]] || return 4
+    grep -Fxv "$1" active > active.new || :
+    command mv active.new active
+}
+if configure_swap; then exit 80; fi
+[[ -n $(compgen -G "$PWD/fstab.network.*") ]]
+''')
 
     def test_replacement_preserves_unterminated_fstab(self):
         self.run_shell(r'''
@@ -97,6 +218,11 @@ printf '%s\n' "$SWAP_FILE" > active
 SIZE_BYTES=536866816
 cp fstab expected
 swapon() {
+    if [[ "$1" = --show=NAME,PRIO ]]; then
+        while IFS= read -r name; do printf '%s 0\n' "$name"; done < active
+        return
+    fi
+    while [[ "$1" = -p || "$1" = -o ]]; do shift 2; done
     case "$1" in
         --show=NAME,SIZE) printf '%s %s\n' "$SWAP_FILE" "$SIZE_BYTES" ;;
         --show=NAME) cat active ;;
@@ -133,6 +259,11 @@ printf '%s\n' "$SWAP_FILE" > active
 SIZE_BYTES=536866816
 cp fstab expected
 swapon() {
+    if [[ "$1" = --show=NAME,PRIO ]]; then
+        while IFS= read -r name; do printf '%s 0\n' "$name"; done < active
+        return
+    fi
+    while [[ "$1" = -p || "$1" = -o ]]; do shift 2; done
     case "$1" in
         --show=NAME,SIZE) printf '%s %s\n' "$SWAP_FILE" "$SIZE_BYTES" ;;
         --show=NAME) cat active ;;
@@ -155,6 +286,11 @@ printf '%s\n/dev/mock\n' "$SWAP_FILE" > active
 SIZE_BYTES=268431360
 cp fstab expected
 swapon() {
+    if [[ "$1" = --show=NAME,PRIO ]]; then
+        while IFS= read -r name; do printf '%s 0\n' "$name"; done < active
+        return
+    fi
+    while [[ "$1" = -p || "$1" = -o ]]; do shift 2; done
     case "$1" in
         --show=NAME,SIZE)
             while IFS= read -r name; do printf '%s %s\n' "$name" "$SIZE_BYTES"; done < active ;;

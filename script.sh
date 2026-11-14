@@ -3,11 +3,11 @@
 # ==============================================================================
 # Linux TCP/IP & BBR 智能优化脚本
 #
-# 版本: v26.10.28
+# 版本: v26.11.14
 # ==============================================================================
 
 # --- 脚本版本号定义 ---
-SCRIPT_VERSION="v26.10.28"
+SCRIPT_VERSION="v26.11.14"
 
 set -Eeuo pipefail
 
@@ -235,10 +235,17 @@ ensure_swap_fstab_entry() {
     case "$status" in
         0) return 0 ;;
         3)
-            local last_byte
-            last_byte=$(tail -c 1 -- /etc/fstab) || return 1
-            { if [[ -n "$last_byte" ]]; then printf '\n' || return 1; fi
-              printf '%s\n' "$SWAP_FILE none swap sw 0 0"; } >> /etc/fstab ;;
+            local last_byte staged
+            staged=$(mktemp /etc/fstab.network.XXXXXX) || return 1
+            if ! cp -p -- /etc/fstab "$staged"; then rm -f -- "$staged"; return 1; fi
+            last_byte=$(tail -c 1 -- "$staged") || { rm -f -- "$staged"; return 1; }
+            if ! { { [[ -z "$last_byte" ]] || printf '\n'; } &&
+                   printf '%s\n' "$SWAP_FILE none swap sw 0 0"; } >> "$staged" ||
+               ! awk -v path="$SWAP_FILE" '$1 == path && $2 == "none" && $3 == "swap" && $4 == "sw" && $5 == 0 && $6 == 0 && NF == 6 { found++ } END { exit (found != 1) }' "$staged" ||
+               ! mv -f -- "$staged" /etc/fstab; then
+                rm -f -- "$staged"
+                return 1
+            fi ;;
         *) error "Swap 启动条目冲突或无法读取 /etc/fstab，未修改。"; return 1 ;;
     esac
 }
@@ -317,35 +324,83 @@ configure_swap() {
 
     step 2 2 "替换并启用 Swap..."
     local old_swap="" fstab_copy active_list active_swap failed=0 installed=false
+    local priority options entry_source entry_type entry_options option fstab_entries find_rc=0
     local -a stopped=()
+    local -A priorities=() swap_options=()
     fstab_copy=$(mktemp /etc/fstab.network.XXXXXX) || { rm -f -- "$new_swap"; return 1; }
     if ! cp -p /etc/fstab "$fstab_copy"; then
         rm -f -- "$new_swap" "$fstab_copy"
         return 1
     fi
-    if ! active_list=$(swapon --show=NAME --noheadings); then
+    if ! active_list=$(swapon --show=NAME,PRIO --noheadings --raw); then
         rm -f -- "$new_swap" "$fstab_copy"
         return 1
     fi
-    while IFS= read -r active_swap; do
+    # Resolve fstab UUID/LABEL aliases without activating any inactive entries.
+    fstab_entries=$(findmnt --fstab --tab-file "$fstab_copy" --evaluate --noheadings --raw --output SOURCE,FSTYPE,OPTIONS) || find_rc=$?
+    if [[ "$find_rc" -gt 1 || ( "$find_rc" -ne 0 && -n "$fstab_entries" ) ]]; then
+        rm -f -- "$new_swap" "$fstab_copy"
+        return 1
+    fi
+    while read -r active_swap priority; do
         [[ -n "$active_swap" ]] || continue
-        if swapoff "$active_swap"; then
-            stopped+=("$active_swap")
-        else
+        if [[ ! "$priority" =~ ^-?[0-9]+$ ]]; then
+            rm -f -- "$new_swap" "$fstab_copy"
+            return 1
+        fi
+        priorities["$active_swap"]=$priority
+        options=""
+        while read -r entry_source entry_type entry_options; do
+            [[ "$entry_source" = "$active_swap" && "$entry_type" = swap ]] || continue
+            local -a entry_parts=()
+            IFS=, read -r -a entry_parts <<< "$entry_options"
+            for option in "${entry_parts[@]}"; do
+                case "$option" in
+                    discard|discard=once|discard=pages) options+="${options:+,}$option" ;;
+                esac
+            done
+        done <<< "$fstab_entries"
+        swap_options["$active_swap"]=$options
+    done <<< "$active_list"
+    # Stop lowest priorities first; restore in reverse order. Linux cannot set a
+    # negative priority explicitly and compacts automatic priorities on swapoff.
+    active_list=$(LC_ALL=C sort -k2,2n <<< "$active_list") || { rm -f -- "$new_swap" "$fstab_copy"; return 1; }
+    local signal_rc=0 saved_int saved_term
+    saved_int=$(trap -p INT); saved_term=$(trap -p TERM)
+    # Defer recovery until the current command's outcome has been recorded.
+    trap 'signal_rc=130; failed=1' INT
+    trap 'signal_rc=143; failed=1' TERM
+    while read -r active_swap priority; do
+        [[ -n "$active_swap" ]] || continue
+        [[ "$failed" -eq 0 ]] || break
+        # Include an attempted swapoff: it can mutate state then exit nonzero.
+        stopped+=("$active_swap")
+        if ! swapoff "$active_swap"; then
             failed=1
             break
         fi
     done <<< "$active_list"
     if [[ "$failed" -eq 0 && -e "$SWAP_FILE" ]]; then
         old_swap=$(mktemp "${SWAP_FILE}.old.XXXXXX") || failed=1
-        if [[ "$failed" -eq 0 ]] && ! mv -f -- "$SWAP_FILE" "$old_swap"; then
+        if [[ "$failed" -eq 0 ]]; then
+            if ! mv -f -- "$SWAP_FILE" "$old_swap"; then
+                # A completed rename may still report interruption. Keep its
+                # destination if the original path has already disappeared.
+                if [[ -e "$SWAP_FILE" ]]; then rm -f -- "$old_swap"; old_swap=""; fi
+                failed=1
+            fi
+        else
             rm -f -- "$old_swap"
             old_swap=""
-            failed=1
         fi
     fi
     if [[ "$failed" -eq 0 ]]; then
-        if mv -f -- "$new_swap" "$SWAP_FILE"; then installed=true; else failed=1; fi
+        if mv -f -- "$new_swap" "$SWAP_FILE"; then
+            installed=true
+        else
+            [[ -e "$new_swap" || ! -e "$SWAP_FILE" ]] || installed=true
+            failed=1
+        fi
     fi
     if [[ "$failed" -eq 0 ]] && ! swapon "$SWAP_FILE"; then failed=1; fi
     if [[ "$failed" -eq 0 ]]; then
@@ -380,18 +435,48 @@ configure_swap() {
             error "fstab 恢复失败，保留：$fstab_copy"
             recovery_failed=true
         fi
-        for active_swap in "${stopped[@]}"; do
+        local stopped_index
+        for ((stopped_index=${#stopped[@]}-1; stopped_index>=0; stopped_index--)); do
+            active_swap=${stopped[stopped_index]}
             if [[ "$active_swap" = "$SWAP_FILE" && "$swap_path_safe" = false ]]; then continue; fi
-            if ! swapon "$active_swap"; then
+            if ! now_active=$(swapon --show=NAME --noheadings --raw); then
+                recovery_failed=true
+                now_active=""
+            fi
+            if grep -Fxq "$active_swap" <<< "$now_active"; then continue; fi
+            local -a restore_args=()
+            if [[ "${priorities[$active_swap]}" -ge 0 ]]; then restore_args+=(-p "${priorities[$active_swap]}"); fi
+            if [[ -n "${swap_options[$active_swap]}" ]]; then restore_args+=(-o "${swap_options[$active_swap]}"); fi
+            if ! swapon "${restore_args[@]}" "$active_swap"; then
                 warning "无法重新启用旧 Swap：$active_swap"
                 recovery_failed=true
             fi
         done
+        local recovered_list
+        if ! recovered_list=$(swapon --show=NAME,PRIO --noheadings --raw); then
+            recovery_failed=true
+        else
+            while read -r active_swap priority; do
+                [[ -n "$active_swap" ]] || continue
+                if ! awk -v name="$active_swap" -v priority="$priority" '$1 == name && $2 == priority { found++ } END { exit (found != 1) }' <<< "$recovered_list"; then
+                    warning "旧 Swap 活动优先级未恢复：$active_swap（原 PRI=$priority）"
+                    recovery_failed=true
+                fi
+            done <<< "$active_list"
+        fi
         rm -f -- "$new_swap"
         if [[ "$recovery_failed" = false ]]; then rm -f -- "$fstab_copy"; fi
         error "Swap 替换失败，已尝试恢复旧文件、fstab 和活动状态。"
+        trap - INT TERM
+        if [[ -n "$saved_int" ]]; then eval "$saved_int"; fi
+        if [[ -n "$saved_term" ]]; then eval "$saved_term"; fi
+        if [[ "$signal_rc" -ne 0 ]]; then return "$signal_rc"; fi
         return 1
     fi
+    # Commit point: files, fstab and active readback agree; cleanup is not rollback.
+    trap - INT TERM
+    if [[ -n "$saved_int" ]]; then eval "$saved_int"; fi
+    if [[ -n "$saved_term" ]]; then eval "$saved_term"; fi
     rm -f -- "$fstab_copy" "$new_swap" || return 1
     if [[ -n "$old_swap" ]]; then rm -f -- "$old_swap" || return 1; fi
     success "Swap 已启用：${swap_mb}MiB"
@@ -586,6 +671,10 @@ configure_network() {
         [[ -z "$previous" ]] || rm -f -- "$previous"
         return 1
     fi
+    local network_signal_rc=0 saved_int saved_term
+    saved_int=$(trap -p INT); saved_term=$(trap -p TERM)
+    trap 'network_signal_rc=130; rc=130' INT
+    trap 'network_signal_rc=143; rc=143' TERM
     # Write through resolved targets: retain symlinks, inode permissions and owners.
     installed=true
     if [[ -e "$config_real" ]]; then
@@ -595,12 +684,14 @@ configure_network() {
     fi
     if [[ "$rc" -eq 0 ]]; then
         for ((i=0; i<${#takeover_files[@]}; i++)); do
+            [[ "$rc" -eq 0 ]] || break
             touched=$((i + 1))
             if ! cat -- "${takeover_outputs[i]}" > "${takeover_files[i]}" ||
                ! cmp -s -- "${takeover_outputs[i]}" "${takeover_files[i]}"; then rc=1; break; fi
         done
     fi
     if [[ "$rc" -eq 0 ]]; then apply_and_verify || rc=$?; fi
+    if [[ "$network_signal_rc" -ne 0 ]]; then rc=$network_signal_rc; fi
     if [[ "$rc" -ne 0 ]]; then
         if [[ "$installed" = true ]]; then
             if [[ -n "$previous" ]]; then
@@ -642,8 +733,12 @@ configure_network() {
         fi
         error "应用失败，已尝试恢复本次修改的配置及目标运行值；不是全系统回滚，Swap 不受此恢复影响。"
     else
-        rm -f -- "$snapshot" || return 1
+        rm -f -- "$snapshot" || rc=1
     fi
+    trap - INT TERM
+    if [[ -n "$saved_int" ]]; then eval "$saved_int"; fi
+    if [[ -n "$saved_term" ]]; then eval "$saved_term"; fi
+    if [[ "$network_signal_rc" -ne 0 ]]; then rc=$network_signal_rc; fi
     rm -f -- "$staged" "${takeover_staged[@]}" || return 1
     if [[ "$rc" -eq 0 ]]; then
         for i in "${takeover_backups[@]}"; do warning "同名参数已停用，原文件备份：$i"; done
@@ -690,11 +785,15 @@ main() {
                 exit 2
             fi
             require_root
-            local backup
-            backup=$(find "$(dirname "$CONF_FILE")" -maxdepth 1 -type f \
-                -name "$(basename "$CONF_FILE").bak_*" -printf '%T@ %p\n' 2>/dev/null \
-                | sort -nr | awk 'NR == 1 {sub(/^[^ ]+ /, ""); print}')
-            if [[ "$1" == "restore" && -n "$backup" ]]; then
+            if [[ "$1" == "restore" ]]; then
+                local backup
+                backup=$(find "$(dirname "$CONF_FILE")" -maxdepth 1 -type f \
+                    -name "$(basename "$CONF_FILE").bak_*" -printf '%T@ %p\n' 2>/dev/null \
+                    | sort -nr | awk 'NR == 1 {sub(/^[^ ]+ /, ""); print}')
+                if [[ -z "$backup" ]]; then
+                    warning "未找到可恢复的备份。"
+                    exit 1
+                fi
                 section "恢复备份"
                 step 1 2 "正在恢复：$backup"
                 step 2 2 "正在加载并验证恢复的配置..."
@@ -705,9 +804,6 @@ main() {
                     exit 1
                 fi
                 exit 0
-            elif [[ "$1" == "restore" ]]; then
-                warning "未找到可恢复的备份。"
-                exit 1
             fi
             section "卸载网络优化"
             warning "仅删除优化配置；当前运行参数保持不变，不撤销 Swap 或参数接管。"

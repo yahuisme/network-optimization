@@ -40,6 +40,24 @@ if (main {args}); then rc=0; else rc=$?; fi
 [[ $rc = {expected} && ! -e mutated ]]
 ''')
 
+    def test_uninstall_direct_does_not_scan_backups(self):
+        for prepare, expected in (
+            ('printf original > "$CONF_FILE"', 0),
+            ('CONF_FILE="$PWD/missing/network.conf"', 0),
+            ('printf original > "$CONF_FILE"; rm() { return 7; }', 7),
+        ):
+            with self.subTest(prepare=prepare):
+                self.run_shell(test_file_max.extract('main') + r'''
+require_root() { :; }
+find() { touch scanned; return 9; }
+''' + prepare + r'''
+declare -f main require_root find section step warning success > child.sh
+if declare -F rm >/dev/null; then declare -f rm >> child.sh; fi
+printf 'set -Eeuo pipefail\nCONF_FILE=%q\nmain uninstall\n' "$CONF_FILE" >> child.sh
+if bash child.sh; then rc=0; else rc=$?; fi
+''' + f'[[ $rc = {expected} && ! -e scanned ]]\n' +
+                               ('[[ -e "$CONF_FILE" ]]' if expected else '[[ ! -e "$CONF_FILE" ]]'))
+
     def test_uninstall_leaves_runtime_untouched(self):
         self.run_shell(test_file_max.extract('usage') + '\n' + test_file_max.extract('main') + r'''
 BOLD='' NC='' SCRIPT_VERSION=test
