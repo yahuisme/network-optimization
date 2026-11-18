@@ -315,6 +315,39 @@ configure_swap
 ! compgen -G "$SWAP_FILE.new.*"
 ''')
 
+    def test_replacement_preserves_external_fstab_change(self):
+        for change in ('append', 'repoint'):
+            with self.subTest(change=change):
+                output = self.run_shell(f'CHANGE={change}\n' + r'''
+printf 'old swap\n' > "$SWAP_FILE"
+printf '%s\n' "$SWAP_FILE" > active
+SIZE_BYTES=536866816
+mv fstab fstab.original
+ln -s fstab.original fstab
+eval "$(declare -f swapoff | sed '1s/swapoff/mock_swapoff/')"
+swapoff() {
+    mock_swapoff "$@" || return 1
+    [[ ! -e changed ]] || return 0
+    touch changed
+    if [[ "$CHANGE" = append ]]; then
+        printf '# external edit\n' >> fstab
+    else
+        cp fstab fstab.other
+        ln -sfn fstab.other fstab
+    fi
+}
+if configure_swap; then exit 80; fi
+[[ $(cat "$SWAP_FILE") = 'old swap' && $(cat active) = "$SWAP_FILE" ]]
+if [[ "$CHANGE" = append ]]; then
+    [[ $(readlink fstab) = fstab.original ]]
+    grep -Fx '# external edit' fstab
+else
+    [[ $(readlink fstab) = fstab.other ]]
+    cmp fstab.original fstab.other
+fi
+''')
+                self.assertIn('fstab 已被其他操作修改', output.stdout)
+
     def test_activation_failure_restores_files_and_runtime(self):
         self.run_shell(r'''
 printf 'old swap\n' > "$SWAP_FILE"

@@ -416,6 +416,12 @@ configure_swap() {
         local final_swap
         if ! final_swap=$(swapon --show=NAME --noheadings --raw) || [[ "$final_swap" != "$SWAP_FILE" ]]; then failed=1; fi
     fi
+    # Detect edits made while Swap was changing; comparison and rename are not a CAS.
+    if [[ "$failed" -eq 0 ]] &&
+       { [[ "$(realpath -e -- /etc/fstab)" != "$fstab_real" ]] || ! cmp -s -- "$fstab_copy" "$fstab_real"; }; then
+        warning "fstab 已被其他操作修改或无法读取，保留其内容并恢复活动 Swap。"
+        failed=1
+    fi
     if [[ "$failed" -eq 0 ]]; then mv -fT -- "$fstab_staged" "$fstab_real" || failed=1; fi
     if [[ "$failed" -ne 0 ]]; then
         # Never unlink a file that may still be active; recover independent items.
