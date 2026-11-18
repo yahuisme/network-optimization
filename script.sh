@@ -332,8 +332,7 @@ configure_swap() {
     step 2 2 "替换并启用 Swap..."
     local old_swap="" fstab_real fstab_copy fstab_staged active_list raw_name active_swap failed=0 installed=false
     local priority options entry_source entry_type entry_options option fstab_entries find_rc=0
-    local -a stopped=()
-    local -A priorities=() swap_options=()
+    local -A swap_options=()
     if ! fstab_real=$(realpath -e -- /etc/fstab) || [[ ! -f "$fstab_real" ]]; then
         rm -f -- "$new_swap"
         return 1
@@ -362,7 +361,6 @@ configure_swap() {
             rm -f -- "$new_swap" "$fstab_copy" "$fstab_staged"
             return 1
         fi
-        priorities["$raw_name"]=$priority
         options=""
         while read -r entry_source entry_type entry_options; do
             [[ "$entry_source" = "$raw_name" && "$entry_type" = swap ]] || continue
@@ -376,7 +374,7 @@ configure_swap() {
         done <<< "$fstab_entries"
         swap_options["$raw_name"]=$options
     done <<< "$active_list"
-    local signal_rc=0 saved_int saved_term uncertain_swap=""
+    local signal_rc=0 saved_int saved_term
     saved_int=$(trap -p INT); saved_term=$(trap -p TERM)
     # Defer recovery until the current command's outcome has been recorded.
     trap 'signal_rc=130; failed=1' INT
@@ -386,10 +384,7 @@ configure_swap() {
         [[ "$failed" -eq 0 ]] || break
         # Raw output escapes unsafe bytes as \xHH. Decode only for argv.
         printf -v active_swap '%b' "$raw_name"
-        if swapoff "$active_swap"; then
-            stopped+=("$raw_name")
-        else
-            uncertain_swap=$raw_name
+        if ! swapoff "$active_swap"; then
             failed=1
             break
         fi
@@ -448,32 +443,37 @@ configure_swap() {
             error "fstab 恢复失败，保留：$fstab_copy"
             recovery_failed=true
         fi
-        if [[ -n "$uncertain_swap" ]]; then
-            if now_active=$(swapon --show=NAME --noheadings --raw); then
-                if ! grep -Fxq -- "$uncertain_swap" <<< "$now_active"; then stopped+=("$uncertain_swap"); fi
-            else
-                warning "无法确认旧 Swap 是否已停用，不重复启用：$uncertain_swap"
-            fi
-        fi
-        local stopped_index
-        for ((stopped_index=${#stopped[@]}-1; stopped_index>=0; stopped_index--)); do
-            raw_name=${stopped[stopped_index]}
-            printf -v active_swap '%b' "$raw_name"
-            if [[ "$active_swap" = "$SWAP_FILE" && "$swap_path_safe" = false ]]; then continue; fi
-            local -a restore_args=()
-            if [[ "${priorities[$raw_name]}" -ge 0 ]]; then restore_args+=(-p "${priorities[$raw_name]}"); fi
-            if [[ -n "${swap_options[$raw_name]}" ]]; then restore_args+=(-o "${swap_options[$raw_name]}"); fi
-            if ! swapon "${restore_args[@]}" "$active_swap"; then
-                warning "无法重新启用旧 Swap：$active_swap"
+        local attempt reverse_snapshot recovered_list
+        local -A active_names=()
+        # A failed swapoff may have completed. Retry readback, not activation.
+        for ((attempt=0; attempt<3; attempt++)); do
+            now_active=$(swapon --show=NAME,PRIO --noheadings --raw) && break
+        done
+        if (( attempt == 3 )) || ! reverse_snapshot=$(tac <<< "$active_list"); then
+            warning "无法确认旧 Swap 状态，跳过重新启用。"
+            recovery_failed=true
+        else
+            while read -r raw_name _; do
+                [[ -z "$raw_name" ]] || active_names["$raw_name"]=1
+            done <<< "$now_active"
+            while read -r raw_name priority; do
+                [[ -n "$raw_name" && -z "${active_names[$raw_name]:-}" ]] || continue
+                printf -v active_swap '%b' "$raw_name"
+                if [[ "$active_swap" = "$SWAP_FILE" && "$swap_path_safe" = false ]]; then continue; fi
+                local -a restore_args=()
+                if [[ "$priority" -ge 0 ]]; then restore_args+=(-p "$priority"); fi
+                if [[ -n "${swap_options[$raw_name]}" ]]; then restore_args+=(-o "${swap_options[$raw_name]}"); fi
+                if ! swapon "${restore_args[@]}" "$active_swap"; then
+                    warning "无法重新启用旧 Swap：$active_swap"
+                    recovery_failed=true
+                fi
+            done <<< "$reverse_snapshot"
+            if ! recovered_list=$(swapon --show=NAME,PRIO --noheadings --raw | LC_ALL=C sort -k2,2n); then
+                recovery_failed=true
+            elif [[ "$recovered_list" != "$active_list" ]]; then
+                warning "旧 Swap 活动优先级未恢复；预期活动列表：${active_list:-无}；实际：${recovered_list:-无}"
                 recovery_failed=true
             fi
-        done
-        local recovered_list
-        if ! recovered_list=$(swapon --show=NAME,PRIO --noheadings --raw | LC_ALL=C sort -k2,2n); then
-            recovery_failed=true
-        elif [[ "$recovered_list" != "$active_list" ]]; then
-            warning "旧 Swap 活动优先级未恢复；预期活动列表：${active_list:-无}；实际：${recovered_list:-无}"
-            recovery_failed=true
         fi
         rm -f -- "$new_swap" "$fstab_staged" || recovery_failed=true
         if [[ "$recovery_failed" = false ]]; then

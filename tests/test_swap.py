@@ -87,7 +87,7 @@ cp fstab expected
 swapon() {
     case "$1" in
         --show=NAME,SIZE) while read -r name; do printf '%s %s\n' "$name" "$SIZE_BYTES"; done < active ;;
-        --show=NAME,PRIO) cat priorities ;;
+        --show=NAME,PRIO) awk 'NR==FNR {p[$1]=$2; next} {print $0, p[$0]}' priorities active ;;
         --show=NAME) cat active ;;
         *)
             [[ "$*" != *-a* && "$*" != *--all* ]] || return 99
@@ -162,8 +162,11 @@ swapon() {
     case "$1" in
         --show=NAME,SIZE) while read -r name; do printf '%s %s\n' "$name" "$SIZE_BYTES"; done < active ;;
         --show=NAME,PRIO)
-            if [[ -e recovered ]]; then printf '/dev/mock1 -2\n/dev/mock2 200\n';
-            else printf '/dev/mock1 100\n/dev/mock2 200\n'; fi ;;
+            while read -r name; do
+                if [[ "$name" = /dev/mock2 ]]; then printf '%s 200\n' "$name"
+                elif [[ -e recovered ]]; then printf '%s -2\n' "$name"
+                else printf '%s 100\n' "$name"; fi
+            done < active ;;
         --show=NAME) cat active ;;
         *) touch recovered; printf '%s\n' "${@: -1}" >> active ;;
     esac
@@ -174,7 +177,7 @@ swapoff() {
     command mv active.new active
 }
 if configure_swap; then exit 80; fi
-[[ -n $(compgen -G "$PWD/fstab.network.*") ]]
+[[ -e recovered && -n $(compgen -G "$PWD/fstab.network.*") ]]
 ''')
 
     def test_replacement_preserves_unterminated_fstab(self):
@@ -251,39 +254,54 @@ if configure_swap; then exit 80; fi
 [[ -e activation_attempted && -e restored && $(cat active) = "$raw" ]]
 ''')
 
-    def test_unknown_swapoff_outcome_does_not_retry_active_entry(self):
-        for outcome in ('removed', 'remains'):
-            with self.subTest(outcome=outcome):
-                result = self.run_shell(f'OUTCOME={outcome}\n' + r'''
+    def test_swapoff_error_reconciles_snapshot_after_two_failed_queries(self):
+        for outcome, failures in (('removed', 2), ('remains', 2), ('removed', 4)):
+            with self.subTest(outcome=outcome, failures=failures):
+                self.run_shell(f'OUTCOME={outcome}\nFAILURES={failures}\n' + r'''
 printf '/dev/first\n/dev/second\n' > active
+cp -p fstab expected
 SIZE_BYTES=268431360
 eval "$(declare -f swapon | sed '1s/swapon/mock_swapon/')"
 swapon() {
-    case "$1" in
-        --show=NAME) [[ ! -e uncertain ]] || return 7 ;;
-    esac
-    if [[ "${@: -1}" = /dev/second ]]; then touch retried; fi
+    if [[ "$1" = --show=* && -s failed-queries-left ]]; then
+        local left
+        read -r left < failed-queries-left
+        if (( left > 0 )); then
+            printf '%s\n' "$((left - 1))" > failed-queries-left
+            return 7
+        fi
+    fi
+    if [[ "$1" != --show=* ]]; then
+        printf '%s\n' "${@: -1}" >> restored
+        if grep -Fxq -- "${@: -1}" active; then touch duplicate_activation; return 8; fi
+    fi
     mock_swapon "$@"
 }
 swapoff() {
     if [[ "$1" = /dev/second ]]; then
-        touch uncertain
+        printf '%s\n' "$FAILURES" > failed-queries-left
         if [[ "$OUTCOME" = removed ]]; then : > active; fi
         return 5
     fi
     printf '/dev/second\n' > active
 }
-if configure_swap; then exit 80; fi
-[[ -e uncertain && ! -e retried ]]
-grep -Fx /dev/first active
-if [[ "$OUTCOME" = removed ]]; then
-    [[ -n $(compgen -G "$PWD/fstab.network.*") ]]
-else
-    grep -Fx /dev/second active
+if configure_swap; then exit 80; else [[ $? = 1 ]]; fi
+cmp fstab expected
+if (( FAILURES > 3 )); then
+    [[ $(< failed-queries-left) = 1 && ! -e restored ]]
+    backup=$(compgen -G "$PWD/fstab.network.*")
+    cmp "$backup" expected
+    exit 0
 fi
+[[ $(< failed-queries-left) = 0 && ! -e duplicate_activation ]]
+if [[ "$OUTCOME" = removed ]]; then
+    [[ $(< restored) = $'/dev/second\n/dev/first' ]]
+else
+    [[ $(< restored) = /dev/first ]]
+fi
+[[ $(sort active) = $'/dev/first\n/dev/second' ]]
+[[ -z $(compgen -G "$PWD/fstab.network.*") ]]
 ''')
-                if outcome == 'removed':
-                    self.assertIn('旧 Swap 活动优先级未恢复', result.stdout)
 
     def test_successful_swap_replacement(self):
         self.run_shell(r'''
