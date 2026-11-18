@@ -9,7 +9,7 @@ SOURCE = (pathlib.Path(__file__).resolve().parents[1] / 'script.sh').read_text()
 
 
 def functions():
-    names = ['configure_swap', 'ensure_swap_fstab_entry']
+    names = ['configure_swap', 'ensure_swap_fstab_entry', 'append_swap_fstab_entry']
     blocks = []
     for name in names:
         match = re.search(r'^' + name + r'\(\) \{\n.*?^\}', SOURCE, re.M | re.S)
@@ -198,6 +198,92 @@ configure_swap
 grep -Fx 'UUID=root / ext4 defaults 0 1' fstab
 [[ $(grep -Fxc "$SWAP_FILE none swap sw 0 0" fstab) = 1 ]]
 ''')
+
+    def test_replacement_preserves_fstab_symlink_and_target_mode(self):
+        self.run_shell(r'''
+mkdir config
+mv fstab config/boot
+chmod 640 config/boot
+ln -s config/boot fstab
+configure_swap
+[[ -L fstab && $(stat -c %a config/boot) = 640 ]]
+grep -Fx "$SWAP_FILE none swap sw 0 0" config/boot
+''')
+
+    def test_replacement_does_not_write_fstab_before_active_readback(self):
+        self.run_shell(r'''
+printf '/dev/mock none swap sw 0 0\n' > fstab
+cp fstab expected
+printf '/dev/mock\n' > active
+SIZE_BYTES=536866816
+eval "$(declare -f swapon | sed '1s/swapon/mock_swapon/')"
+swapon() {
+    if [[ "$1" = --show=NAME && -e installed ]]; then
+        cmp -s fstab expected || touch fstab_changed_early
+        return 7
+    fi
+    if [[ "$1" = "$SWAP_FILE" ]]; then touch installed; fi
+    mock_swapon "$@"
+}
+if configure_swap; then exit 80; fi
+[[ -e installed && ! -e fstab_changed_early ]]
+cmp fstab expected
+''')
+
+    def test_raw_swap_path_and_fstab_discard_survive_rollback(self):
+        self.run_shell(r'''
+path="$PWD/old swap\\file"
+raw="$PWD/old\x20swap\x5cfile"
+printf '%s\n' "$raw" > active
+printf '%s none swap discard=pages 0 0\n' "$PWD/old\040swap\134file" > fstab
+SIZE_BYTES=536866816
+eval "$(declare -f swapon | sed '1s/swapon/mock_swapon/')"
+swapon() {
+    case "$1" in
+        --show=*) mock_swapon "$@" ;;
+        "$SWAP_FILE") touch activation_attempted; return 1 ;;
+        *) [[ "$#" = 5 && "$1" = -p && "$2" = 0 && "$3" = -o && "$4" = discard=pages && "$5" = "$path" ]] || return 97
+           printf '%s\n' "$raw" >> active; touch restored ;;
+    esac
+}
+swapoff() { [[ "$1" = "$path" ]] || return 98; : > active; }
+if configure_swap; then exit 80; fi
+[[ -e activation_attempted && -e restored && $(cat active) = "$raw" ]]
+''')
+
+    def test_unknown_swapoff_outcome_does_not_retry_active_entry(self):
+        for outcome in ('removed', 'remains'):
+            with self.subTest(outcome=outcome):
+                result = self.run_shell(f'OUTCOME={outcome}\n' + r'''
+printf '/dev/first\n/dev/second\n' > active
+SIZE_BYTES=268431360
+eval "$(declare -f swapon | sed '1s/swapon/mock_swapon/')"
+swapon() {
+    case "$1" in
+        --show=NAME) [[ ! -e uncertain ]] || return 7 ;;
+    esac
+    if [[ "${@: -1}" = /dev/second ]]; then touch retried; fi
+    mock_swapon "$@"
+}
+swapoff() {
+    if [[ "$1" = /dev/second ]]; then
+        touch uncertain
+        if [[ "$OUTCOME" = removed ]]; then : > active; fi
+        return 5
+    fi
+    printf '/dev/second\n' > active
+}
+if configure_swap; then exit 80; fi
+[[ -e uncertain && ! -e retried ]]
+grep -Fx /dev/first active
+if [[ "$OUTCOME" = removed ]]; then
+    [[ -n $(compgen -G "$PWD/fstab.network.*") ]]
+else
+    grep -Fx /dev/second active
+fi
+''')
+                if outcome == 'removed':
+                    self.assertIn('旧 Swap 活动优先级未恢复', result.stdout)
 
     def test_successful_swap_replacement(self):
         self.run_shell(r'''

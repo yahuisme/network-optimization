@@ -28,7 +28,7 @@ class SignalTests(unittest.TestCase):
 
     def test_swap_signal_after_completed_command_restores_old_state(self):
         for signal, code in (('TERM', 143), ('INT', 130)):
-            for boundary in ('swapoff', 'old-mv', 'new-mv'):
+            for boundary in ('swapoff', 'old-mv', 'new-mv', 'fstab-mv'):
                 with self.subTest(signal=signal, boundary=boundary):
                     self.run_fixture(test_swap.functions(), test_swap.SETUP,
                                      f'SIGNAL={signal}\nBOUNDARY={boundary}\n' + r'''
@@ -64,7 +64,7 @@ fi
 ''',
                         'mock-mv': r'''
 /usr/bin/mv "$@"
-if [[ ! -e sent && ( ( "$BOUNDARY" = new-mv && "$*" = *swapfile.new.* ) || ( "$BOUNDARY" = old-mv && "$*" = *swapfile.old.* ) ) ]]; then
+if [[ ! -e sent && ( ( "$BOUNDARY" = new-mv && "$*" = *swapfile.new.* ) || ( "$BOUNDARY" = old-mv && "$*" = *swapfile.old.* ) || ( "$BOUNDARY" = fstab-mv && "$*" = *fstab.network-stage.* ) ) ]]; then
     touch sent
     kill -s "$SIGNAL" "$PPID"
 fi
@@ -72,7 +72,7 @@ fi
                     })
 
     def test_signal_and_nonzero_command_after_swap_mutation_still_recovers(self):
-        for boundary in ('swapoff', 'old-mv', 'new-mv'):
+        for boundary in ('swapoff', 'old-mv', 'new-mv', 'fstab-mv'):
             with self.subTest(boundary=boundary):
                 self.run_fixture(test_swap.functions(), test_swap.SETUP,
                                  f'BOUNDARY={boundary}\n' + r'''
@@ -98,7 +98,7 @@ fi
 ''',
                     'mock-mv': r'''
 /usr/bin/mv "$@"
-if [[ ! -e sent && ( ( "$BOUNDARY" = old-mv && "$*" = *swapfile.old.* ) || ( "$BOUNDARY" = new-mv && "$*" = *swapfile.new.* ) ) ]]; then
+if [[ ! -e sent && ( ( "$BOUNDARY" = old-mv && "$*" = *swapfile.old.* ) || ( "$BOUNDARY" = new-mv && "$*" = *swapfile.new.* ) || ( "$BOUNDARY" = fstab-mv && "$*" = *fstab.network-stage.* ) ) ]]; then
     touch sent; kill -TERM "$PPID"; exit 143
 fi
 ''',
@@ -160,6 +160,27 @@ before=$(trap -p INT TERM)
 if configure_network; then :; else [[ $? = 7 ]]; fi
 [[ $(trap -p INT TERM) = "$before" ]]
 ''', {})
+
+    def test_network_signal_during_post_commit_cleanup_preserves_takeover_backup(self):
+        self.run_fixture(test_file_max.FUNCTIONS, test_file_max.SETUP, r'''
+mkdir etc
+printf 'vm.swappiness=99\n' > etc/other.conf
+cp -p etc/other.conf other.expected
+rm() { "$PWD/mock-rm" "$@"; }
+trap 'touch prior_fired' TERM
+if configure_network; then rc=0; else rc=$?; fi
+[[ -e sent && -e prior_fired && "$rc" = 0 ]]
+[[ $(cat vm.swappiness) = 10 ]]
+grep -Fx '# network-optimization disabled: vm.swappiness=99' etc/other.conf
+backups=(etc/other.conf.network-backup.*)
+[[ ${#backups[@]} = 1 ]]
+cmp other.expected "${backups[0]}"
+''', {'mock-rm': r'''
+/usr/bin/rm "$@"
+if [[ ! -e sent && "$*" = *.runtime.* ]]; then
+    touch sent; kill -TERM "$PPID"
+fi
+'''})
 
     def test_network_signal_during_partial_load_restores_files_and_runtime(self):
         for signal, code in (('TERM', 143), ('INT', 130)):

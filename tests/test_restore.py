@@ -87,6 +87,14 @@ unset VM_TIER TOTAL_MEM CPU_CORES FILE_MAX
 [[ $(cat vm.swappiness) = 30 ]]
 ''')
 
+    def test_restore_preserves_transaction_signal_status(self):
+        for rc in (130, 143):
+            with self.subTest(rc=rc):
+                self.run_restore(f'''
+configure_network() {{ [[ "$1" = "$CONF_FILE.bak_test" ]] || return 99; return {rc}; }}
+if (main restore); then exit 80; else [[ $? = {rc} ]]; fi
+''')
+
     def test_success_does_not_take_over_other_files_or_rotate_backup(self):
         self.run_restore(r'''
 mkdir "$PWD/etc"

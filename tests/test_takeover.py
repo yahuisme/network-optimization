@@ -52,6 +52,17 @@ configure_network
 cmp expected "$PWD/usr/vendor.conf"
 ''')
 
+    def test_dangling_external_alias_does_not_block_exact_key_takeover(self):
+        self.run_shell(r'''
+mkdir etc
+ln -s "$SYSCTL_MAIN" etc/99-sysctl.conf
+printf 'vm.swappiness=99\n' > etc/other.conf
+configure_network
+[[ -L etc/99-sysctl.conf && ! -e "$SYSCTL_MAIN" ]]
+grep -Fx '# network-optimization disabled: vm.swappiness=99' etc/other.conf
+[[ -e loaded ]]
+''')
+
     def test_unchanged_rerun_keeps_single_external_backup(self):
         self.run_shell(r'''
 mkdir "$PWD/etc"

@@ -10,7 +10,7 @@
 curl -fsSLo network-optimization.sh https://raw.githubusercontent.com/yahuisme/network-optimization/main/script.sh && bash network-optimization.sh
 ```
 
-**Swap**：内存 ≤512 MiB 配 512 MiB，≤1024 MiB 配 1024 MiB，其余配 2048 MiB。现有总量一致则保留，否则停用全部现有 Swap（含分区）并替换为 `/swapfile`。
+**Swap**：内存 ≤512 MiB 配 512 MiB，≤1024 MiB 配 1024 MiB，其余配 2048 MiB。现有总量一致则保留，否则停用全部现有 Swap（含分区）并替换为 `/swapfile`。确认新 Swap 已启用后才替换 `/etc/fstab` 中的 Swap 条目。
 
 ## 恢复与卸载
 
